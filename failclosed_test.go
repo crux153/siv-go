@@ -26,6 +26,10 @@ func TestFailClosed(t *testing.T) {
 		}
 	}
 
+	if c, err := NewSegmentCipher(make([]byte, 16), MinSegmentSize); !errors.Is(err, ErrUnsupportedCPU) || c != nil {
+		t.Fatalf("NewSegmentCipher: expected %v, got %v", ErrUnsupportedCPU, err)
+	}
+
 	// Invalid key sizes are still reported as such.
 	_, err := NewGCM(make([]byte, 24))
 	var kse aes.KeySizeError
