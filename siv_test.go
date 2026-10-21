@@ -597,6 +597,38 @@ func testInvalidNonceSize(t *testing.T, keySize int) {
 
 // AES-GCM-SIV
 
+func BenchmarkSeal64_AES_GCM_SIV_128(b *testing.B) {
+	benchmarkSeal(b, NewGCM, 16, make([]byte, 64))
+}
+
+func BenchmarkOpen64_AES_GCM_SIV_128(b *testing.B) {
+	benchmarkOpen(b, NewGCM, 16, make([]byte, 64))
+}
+
+func BenchmarkSeal64_AES_GCM_SIV_256(b *testing.B) {
+	benchmarkSeal(b, NewGCM, 32, make([]byte, 64))
+}
+
+func BenchmarkOpen64_AES_GCM_SIV_256(b *testing.B) {
+	benchmarkOpen(b, NewGCM, 32, make([]byte, 64))
+}
+
+func BenchmarkSeal64K_AES_GCM_SIV_128(b *testing.B) {
+	benchmarkSeal(b, NewGCM, 16, make([]byte, 64*1024))
+}
+
+func BenchmarkOpen64K_AES_GCM_SIV_128(b *testing.B) {
+	benchmarkOpen(b, NewGCM, 16, make([]byte, 64*1024))
+}
+
+func BenchmarkSeal64K_AES_GCM_SIV_256(b *testing.B) {
+	benchmarkSeal(b, NewGCM, 32, make([]byte, 64*1024))
+}
+
+func BenchmarkOpen64K_AES_GCM_SIV_256(b *testing.B) {
+	benchmarkOpen(b, NewGCM, 32, make([]byte, 64*1024))
+}
+
 func BenchmarkSeal1K_AES_GCM_SIV_128(b *testing.B) {
 	benchmarkSeal(b, NewGCM, 16, make([]byte, 1024))
 }
