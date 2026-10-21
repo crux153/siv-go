@@ -4,10 +4,18 @@ package siv
 
 import (
 	"encoding/binary"
+	"runtime"
 
 	"github.com/crux153/siv-go/internal/polyval"
 	"github.com/ericlagergren/subtle"
+	"golang.org/x/sys/cpu"
 )
+
+// haveAsm reports whether the CPU supports the AES and PMULL
+// instructions used by the assembly implementation. All Apple
+// silicon does.
+var haveAsm = runtime.GOOS == "darwin" ||
+	(cpu.ARM64.HasAES && cpu.ARM64.HasPMULL)
 
 const (
 	// maxEncSize is the maximum number of uint32s used in the

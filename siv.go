@@ -13,16 +13,25 @@ import (
 
 	"github.com/crux153/siv-go/internal/polyval"
 	"github.com/ericlagergren/subtle"
-	"golang.org/x/sys/cpu"
 )
 
 // SSA: go build -v -gcflags='-m -m -d=ssa/opt/debug=1' &> ssa.txt
 
 var errOpen = errors.New("siv: message authentication failure")
 
-var haveAsm = runtime.GOOS == "darwin" ||
-	cpu.ARM64.HasAES ||
-	cpu.X86.HasAES
+// ErrUnsupportedCPU is returned by NewGCM when the CPU does not
+// provide hardware AES and carry-less multiplication.
+//
+// The portable fallback relies on crypto/aes, which is not
+// guaranteed to run in constant time without hardware support,
+// so this package fails closed instead of silently using it.
+var ErrUnsupportedCPU = errors.New("siv: CPU lacks hardware AES or carry-less multiplication")
+
+// allowGeneric permits NewGCM to return an AEAD that uses the
+// portable implementation. It exists so that tests can compare
+// the assembly and generic code paths and must never be set
+// outside of tests.
+var allowGeneric = false
 
 const (
 	// NonceSize is the size in bytes of an AES-GCM-SIV nonce.
@@ -45,13 +54,22 @@ const (
 //
 // The key must be either 16 bytes for 128-bit AES-GCM-SIV or 32
 // bytes for 256-bit AES-GCM-SIV. All other lengths are an error.
+//
+// NewGCM returns ErrUnsupportedCPU if the CPU does not support
+// the instructions needed for the constant-time assembly
+// implementation (AES-NI and PCLMULQDQ on amd64, AES and PMULL
+// on arm64). Builds without assembly (other architectures, gccgo
+// or the purego build tag) always return ErrUnsupportedCPU.
 func NewGCM(key []byte) (cipher.AEAD, error) {
 	switch len(key) {
 	case 16, 32:
-		return &aead{key: dup(key)}, nil
 	default:
 		return nil, aes.KeySizeError(len(key))
 	}
+	if !haveAsm && !allowGeneric {
+		return nil, ErrUnsupportedCPU
+	}
+	return &aead{key: dup(key)}, nil
 }
 
 func dup(x []byte) []byte {

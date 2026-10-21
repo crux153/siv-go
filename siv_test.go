@@ -56,10 +56,10 @@ func hex16(src []byte) string {
 }
 
 func disableAsm(t *testing.T) {
-	old := haveAsm
-	haveAsm = false
+	oldAsm, oldGeneric := haveAsm, allowGeneric
+	haveAsm, allowGeneric = false, true
 	t.Cleanup(func() {
-		haveAsm = old
+		haveAsm, allowGeneric = oldAsm, oldGeneric
 	})
 }
 
@@ -555,11 +555,13 @@ func TestInvalidKeySize(t *testing.T) {
 // TestInvalidNonceSize tests calling Seal or Open with invalid
 // nonce lengths.
 func TestInvalidNonceSize(t *testing.T) {
-	t.Run("128", func(t *testing.T) {
-		testInvalidNonceSize(t, 16)
-	})
-	t.Run("256", func(t *testing.T) {
-		testInvalidNonceSize(t, 32)
+	runTests(t, func(t *testing.T) {
+		t.Run("128", func(t *testing.T) {
+			testInvalidNonceSize(t, 16)
+		})
+		t.Run("256", func(t *testing.T) {
+			testInvalidNonceSize(t, 32)
+		})
 	})
 }
 
@@ -577,7 +579,10 @@ func testInvalidNonceSize(t *testing.T, keySize int) {
 			t.Fatal(err)
 		}
 	}
-	aead, _ := NewGCM(make([]byte, keySize))
+	aead, err := NewGCM(make([]byte, keySize))
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Run("seal", func(t *testing.T) {
 		test(t, func(nonce []byte) {
 			aead.Seal(nil, nonce, nil, nil)

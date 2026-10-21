@@ -2,6 +2,10 @@
 
 package siv
 
+// haveAsm is always false without assembly, so NewGCM fails
+// closed.
+var haveAsm = false
+
 func (a *aead) seal(out, nonce, plaintext, additionalData []byte) {
 	a.sealGeneric(out, nonce, plaintext, additionalData)
 }

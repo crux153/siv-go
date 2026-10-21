@@ -7,7 +7,12 @@ import (
 
 	"github.com/crux153/siv-go/internal/polyval"
 	"github.com/ericlagergren/subtle"
+	"golang.org/x/sys/cpu"
 )
+
+// haveAsm reports whether the CPU supports the AES-NI and
+// PCLMULQDQ instructions used by the assembly implementation.
+var haveAsm = cpu.X86.HasAES && cpu.X86.HasPCLMULQDQ
 
 const (
 	// maxEncSize is the maximum number of uint32s used in the

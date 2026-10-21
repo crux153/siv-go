@@ -10,6 +10,22 @@ This is a fork of [ericlagergren/siv] with
 [ericlagergren/siv]: https://github.com/ericlagergren/siv
 [ericlagergren/polyval]: https://github.com/ericlagergren/polyval
 
+## CPU requirements (fail-closed)
+
+`NewGCM` only returns an AEAD when the constant-time assembly
+implementation can be used:
+
+| GOARCH | Required instructions |
+|--------|-----------------------|
+| amd64  | AES-NI and PCLMULQDQ (SSE2 baseline; no AVX needed) |
+| arm64  | AES and PMULL |
+
+On any other CPU, architecture, compiler (gccgo) or with the
+`purego` build tag, `NewGCM` returns `ErrUnsupportedCPU` instead
+of falling back to `crypto/aes`, whose portable code is not
+guaranteed to run in constant time. The portable implementation
+is kept only as a reference for tests.
+
 ## License
 
 The AES-GCM-SIV code is derived from ericlagergren/siv and is
