@@ -84,7 +84,8 @@ func New(key []byte) (*Polyval, error) {
 	return &p, nil
 }
 
-// Init initializes a Polyval.
+// Init initializes a Polyval, discarding any previous key and
+// running state.
 //
 // The key must be exactly 16 bytes long and cannot be all zero.
 func (p *Polyval) Init(key []byte) error {
@@ -96,6 +97,7 @@ func (p *Polyval) Init(key []byte) error {
 	}
 
 	p.h.setBytes(key)
+	p.y = fieldElement{}
 	p.pow[len(p.pow)-1] = p.h
 	p.havePow = false
 	return nil

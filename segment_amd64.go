@@ -243,6 +243,11 @@ func (s *SegmentSealer) Reset(nonce, additionalData []byte) error {
 }
 
 func (s *SegmentSealer) reset(nonce, additionalData []byte) {
+	// Drop the previous segment, which may have been abandoned
+	// before Finish, with its key material and POLYVAL
+	// accumulator.
+	s.clear()
+
 	var encKey [40]byte
 	var authKey [24]byte
 	deriveKeysAsm(&authKey, &encKey, &s.c.kgk, nonce)

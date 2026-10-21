@@ -391,3 +391,37 @@ func TestWipe(t *testing.T) {
 		t.Fatal("state not wiped")
 	}
 }
+
+// TestInitResets checks that Init discards the running state, so
+// that a reused Polyval hashes exactly like a new one.
+func TestInitResets(t *testing.T) {
+	runTests(t, testInitResets)
+}
+
+func testInitResets(t *testing.T) {
+	key1 := unhex("25629347589242761d31f826ba4b757b")
+	key2 := unhex("d9b360279694941ac5dbc6987ada7377")
+	msg := make([]byte, 16*16)
+	for i := range msg {
+		msg[i] = byte(i)
+	}
+
+	var want Polyval
+	if err := want.Init(key2); err != nil {
+		t.Fatal(err)
+	}
+	want.Update(msg)
+
+	var p Polyval
+	if err := p.Init(key1); err != nil {
+		t.Fatal(err)
+	}
+	p.Update(msg)
+	if err := p.Init(key2); err != nil {
+		t.Fatal(err)
+	}
+	p.Update(msg)
+	if got, want := p.Sum(nil), want.Sum(nil); !bytes.Equal(got, want) {
+		t.Fatalf("expected %x, got %x", want, got)
+	}
+}

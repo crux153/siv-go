@@ -164,6 +164,86 @@ func TestSegmentSealerTiles(t *testing.T) {
 	}
 }
 
+// TestSegmentSealerAbandon checks that Reset discards a segment
+// abandoned before Finish: the next segment must match upstream
+// and open successfully.
+func TestSegmentSealerAbandon(t *testing.T) {
+	for _, keySize := range []int{16, 32} {
+		key := randbuf(keySize)
+		c := newSegmentCipher(t, key, MinSegmentSize)
+		up, err := upstream.NewGCM(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		old := randbuf(4 * SegmentQuantum)
+		for _, tc := range []struct {
+			name string
+			prep func(s *SegmentSealer) error
+		}{
+			{"Reset twice", func(s *SegmentSealer) error {
+				return s.Reset(randbuf(NonceSize), randbuf(SegmentAADSize))
+			}},
+			{"after Absorb", func(s *SegmentSealer) error {
+				if err := s.Reset(randbuf(NonceSize), randbuf(SegmentAADSize)); err != nil {
+					return err
+				}
+				return s.Absorb(old[:SegmentQuantum])
+			}},
+			{"mid KeyStream", func(s *SegmentSealer) error {
+				if err := s.Reset(randbuf(NonceSize), randbuf(SegmentAADSize)); err != nil {
+					return err
+				}
+				if err := s.Absorb(old); err != nil {
+					return err
+				}
+				return s.KeyStream(make([]byte, SegmentQuantum), old[:SegmentQuantum])
+			}},
+			{"after KeyStream", func(s *SegmentSealer) error {
+				if err := s.Reset(randbuf(NonceSize), randbuf(SegmentAADSize)); err != nil {
+					return err
+				}
+				if err := s.Absorb(old); err != nil {
+					return err
+				}
+				return s.KeyStream(make([]byte, len(old)), old)
+			}},
+		} {
+			s := c.NewSealer()
+			if err := tc.prep(s); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+
+			n := 2 * SegmentQuantum
+			nonce := randbuf(NonceSize)
+			aad := randbuf(SegmentAADSize)
+			pt := randbuf(n)
+			want := up.Seal(nil, nonce, pt, aad)
+
+			if err := s.Reset(nonce, aad); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Absorb(pt); err != nil {
+				t.Fatal(err)
+			}
+			got := make([]byte, n, n+TagSize)
+			if err := s.KeyStream(got, pt); err != nil {
+				t.Fatal(err)
+			}
+			tag, err := s.Finish()
+			if err != nil {
+				t.Fatalf("%s: Finish: %v", tc.name, err)
+			}
+			got = append(got, tag[:]...)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("%s: output differs from upstream", tc.name)
+			}
+			if _, err := c.Open(nil, nonce, got, aad); err != nil {
+				t.Fatalf("%s: Open: %v", tc.name, err)
+			}
+		}
+	}
+}
+
 // randomTiles splits p into tiles of random multiples of
 // SegmentQuantum, mostly between 64 KiB and 128 KiB.
 func randomTiles(p []byte) [][]byte {
