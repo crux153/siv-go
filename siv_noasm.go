@@ -6,6 +6,11 @@ package siv
 // closed.
 var haveAsm = false
 
+// keySchedule is unused without assembly.
+type keySchedule struct{}
+
+func (*keySchedule) init([]byte) {}
+
 func (a *aead) seal(out, nonce, plaintext, additionalData []byte) {
 	a.sealGeneric(out, nonce, plaintext, additionalData)
 }

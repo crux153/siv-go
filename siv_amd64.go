@@ -20,6 +20,24 @@ const (
 	maxEncSize = 32 + 28
 )
 
+// keySchedule is an expanded AES key.
+type keySchedule struct {
+	nr  int
+	enc [maxEncSize]uint32
+}
+
+// init expands key, which must be 16 or 32 bytes.
+//
+// It does nothing if the CPU lacks AES-NI, in which case only
+// the generic code (which tests can enable) is used.
+func (k *keySchedule) init(key []byte) {
+	if !haveAsm {
+		return
+	}
+	k.nr = 6 + len(key)/4
+	expandKeyAsm(k.nr, &key[0], &k.enc[0])
+}
+
 func (a *aead) seal(out, nonce, plaintext, additionalData []byte) {
 	if !haveAsm {
 		a.sealGeneric(out, nonce, plaintext, additionalData)
@@ -28,7 +46,7 @@ func (a *aead) seal(out, nonce, plaintext, additionalData []byte) {
 
 	var encKey [40]byte
 	var authKey [24]byte
-	deriveKeys(&authKey, &encKey, a.key, nonce)
+	deriveKeysAsm(&authKey, &encKey, &a.kgk, nonce)
 
 	nr := 6 + len(a.key)/4
 	var enc [maxEncSize]uint32
@@ -52,7 +70,7 @@ func (a *aead) open(out, nonce, ciphertext, tag, additionalData []byte) bool {
 
 	var encKey [40]byte
 	var authKey [24]byte
-	deriveKeys(&authKey, &encKey, a.key, nonce)
+	deriveKeysAsm(&authKey, &encKey, &a.kgk, nonce)
 
 	nr := 6 + len(a.key)/4
 	var enc [maxEncSize]uint32
@@ -72,55 +90,52 @@ func (a *aead) open(out, nonce, ciphertext, tag, additionalData []byte) bool {
 	return subtle.ConstantTimeCompare(tag, wantTag[:]) == 1
 }
 
+// deriveKeys derives the authentication and encryption keys
+// from keyGenKey and nonce and writes them to authKey and
+// encKey.
 func deriveKeys(authKey *[24]byte, encKey *[40]byte, keyGenKey, nonce []byte) {
-	src := make([]byte, 16)
-	copy(src[4:], nonce)
+	if !haveAsm {
+		deriveKeysGeneric(authKey, encKey, keyGenKey, nonce)
+		return
+	}
+	var kgk keySchedule
+	kgk.init(keyGenKey)
+	deriveKeysAsm(authKey, encKey, &kgk, nonce)
+}
 
-	nr := 6 + len(keyGenKey)/4
-	var enc [maxEncSize]uint32
-	expandKeyAsm(nr, &keyGenKey[0], &enc[0])
+// deriveKeysAsm is deriveKeys with an already expanded
+// key-generating key.
+//
+// RFC 8452 derives the keys from
+//
+//	AES(key_generating_key, little_endian_uint32(i) ++ nonce)[:8]
+//
+// for i = 0..3 (AES-128) or i = 0..5 (AES-256). Those inputs
+// are consecutive AES-GCM-SIV counter blocks starting at
+// 0 ++ nonce, so the blocks are produced in parallel by running
+// the CTR code over zeros. The counter cannot wrap.
+func deriveKeysAsm(authKey *[24]byte, encKey *[40]byte, kgk *keySchedule, nonce []byte) {
+	var ctr [TagSize]byte
+	copy(ctr[4:], nonce)
 
-	// message_authentication_key =
-	//     AES(key = key_generating_key,
-	//         block = little_endian_uint32(0) ++ nonce
-	//     )[:8] ++
-	//     AES(key = key_generating_key,
-	//         block = little_endian_uint32(1) ++ nonce
-	//     )[:8]
-	binary.LittleEndian.PutUint32(src, 0)
-	encryptBlockAsm(nr, &enc[0], &authKey[0], &src[0])
+	var ks [6 * blockSize]byte
+	n := 4
+	if kgk.nr == 14 {
+		n = 6
+	}
+	ctrBlocksAsm(kgk.nr, &kgk.enc[0], &ctr, &ks[0], &ks[0], n)
 
-	binary.LittleEndian.PutUint32(src, 1)
-	encryptBlockAsm(nr, &enc[0], &authKey[8], &src[0])
+	// message_authentication_key = blocks 0 and 1.
+	copy(authKey[0:8], ks[0*blockSize:])
+	copy(authKey[8:16], ks[1*blockSize:])
 
-	// messasge_encryption_key =
-	//     AES(key = key_generating_key,
-	//         block = little_endian_uint32(2) ++ nonce
-	//     )[:8] ++
-	//     AES(key = key_generating_key,
-	//         block = little_endian_uint32(3) ++ nonce
-	//     )[:8]
-	binary.LittleEndian.PutUint32(src, 2)
-	encryptBlockAsm(nr, &enc[0], &encKey[0], &src[0])
-
-	binary.LittleEndian.PutUint32(src, 3)
-	encryptBlockAsm(nr, &enc[0], &encKey[8], &src[0])
-
-	// if bytelen(key_generating_key) == 32 {
-	//     message_encryption_key =
-	//         AES(key = key_generating_key,
-	//             block = little_endian_uint32(4) ++ nonce
-	//         )[:8] ++
-	//         AES(key = key_generating_key,
-	//             block = little_endian_uint32(5) ++ nonce
-	//         )[:8]
-	// }
-	if len(keyGenKey) == 32 {
-		binary.LittleEndian.PutUint32(src, 4)
-		encryptBlockAsm(nr, &enc[0], &encKey[16], &src[0])
-
-		binary.LittleEndian.PutUint32(src, 5)
-		encryptBlockAsm(nr, &enc[0], &encKey[24], &src[0])
+	// message_encryption_key = blocks 2 and 3, plus 4 and 5
+	// for AES-256.
+	copy(encKey[0:8], ks[2*blockSize:])
+	copy(encKey[8:16], ks[3*blockSize:])
+	if n == 6 {
+		copy(encKey[16:24], ks[4*blockSize:])
+		copy(encKey[24:32], ks[5*blockSize:])
 	}
 }
 

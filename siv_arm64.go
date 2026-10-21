@@ -17,6 +17,11 @@ import (
 var haveAsm = runtime.GOOS == "darwin" ||
 	(cpu.ARM64.HasAES && cpu.ARM64.HasPMULL)
 
+// keySchedule is unused on arm64.
+type keySchedule struct{}
+
+func (*keySchedule) init([]byte) {}
+
 const (
 	// maxEncSize is the maximum number of uint32s used in the
 	// AES round key expansion.

@@ -69,7 +69,9 @@ func NewGCM(key []byte) (cipher.AEAD, error) {
 	if !haveAsm && !allowGeneric {
 		return nil, ErrUnsupportedCPU
 	}
-	return &aead{key: dup(key)}, nil
+	a := &aead{key: dup(key)}
+	a.kgk.init(a.key)
+	return a, nil
 }
 
 func dup(x []byte) []byte {
@@ -80,6 +82,9 @@ func dup(x []byte) []byte {
 
 type aead struct {
 	key []byte
+	// kgk is the expanded key-generating key, if the
+	// architecture uses one.
+	kgk keySchedule
 }
 
 var _ cipher.AEAD = (*aead)(nil)
