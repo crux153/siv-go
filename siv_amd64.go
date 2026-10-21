@@ -48,18 +48,21 @@ func (a *aead) seal(out, nonce, plaintext, additionalData []byte) {
 	var authKey [24]byte
 	deriveKeysAsm(&authKey, &encKey, &a.kgk, nonce)
 
-	nr := 6 + len(a.key)/4
-	var enc [maxEncSize]uint32
-	expandKeyAsm(nr, &encKey[0], &enc[0])
+	var enc keySchedule
+	enc.init(encKey[:len(a.key)])
+
+	var p polyval.Polyval
+	initPolyval(&p, authKey[:16])
+	absorbPadded(&p, additionalData)
+	absorbPadded(&p, plaintext)
 
 	tag := (*[TagSize]byte)(out[len(out)-TagSize:])
-	sum(tag, authKey[:16], nonce, plaintext, additionalData)
-	encryptBlockAsm(nr, &enc[0], &tag[0], &tag[0])
+	finishTag(&p, tag, &enc, nonce, len(additionalData), len(plaintext))
 
 	if len(plaintext) > 0 {
 		block := *tag
 		block[15] |= 0x80
-		aesctr(nr, &enc[0], &block, out, plaintext)
+		aesctr(enc.nr, &enc.enc[0], &block, out, plaintext)
 	}
 }
 
@@ -72,22 +75,43 @@ func (a *aead) open(out, nonce, ciphertext, tag, additionalData []byte) bool {
 	var authKey [24]byte
 	deriveKeysAsm(&authKey, &encKey, &a.kgk, nonce)
 
-	nr := 6 + len(a.key)/4
-	var enc [maxEncSize]uint32
-	expandKeyAsm(nr, &encKey[0], &enc[0])
+	var enc keySchedule
+	enc.init(encKey[:len(a.key)])
+
+	var p polyval.Polyval
+	initPolyval(&p, authKey[:16])
+	absorbPadded(&p, additionalData)
 
 	if len(ciphertext) > 0 {
 		var block [TagSize]byte
 		copy(block[:], tag)
 		block[15] |= 0x80
-		aesctr(nr, &enc[0], &block, out, ciphertext)
+		openBlocks(&p, &enc, &block, out, ciphertext)
 	}
 
 	var wantTag [TagSize]byte
-	sum(&wantTag, authKey[:16], nonce, out, additionalData)
-	encryptBlockAsm(nr, &enc[0], &wantTag[0], &wantTag[0])
-
+	finishTag(&p, &wantTag, &enc, nonce, len(additionalData), len(ciphertext))
 	return subtle.ConstantTimeCompare(tag, wantTag[:]) == 1
+}
+
+// openBlocks decrypts src into dst with AES-CTR starting at
+// block and absorbs the zero-padded plaintext into p.
+//
+// Whole groups of eight blocks go through openFusedAsm, which
+// decrypts and hashes in a single pass; the rest is decrypted
+// and then hashed.
+func openBlocks(p *polyval.Polyval, enc *keySchedule, block *[TagSize]byte, dst, src []byte) {
+	if n := (len(src) / blockSize) &^ 7; n > 0 {
+		_ = dst[n*blockSize-1] // bounds check
+		acc, pow := p.Raw()
+		openFusedAsm(enc.nr, &enc.enc[0], block, &dst[0], &src[0], n, acc, pow)
+		dst = dst[n*blockSize:]
+		src = src[n*blockSize:]
+	}
+	if len(src) > 0 {
+		aesctr(enc.nr, &enc.enc[0], block, dst, src)
+		absorbPadded(p, dst[:len(src)])
+	}
 }
 
 // deriveKeys derives the authentication and encryption keys
@@ -139,48 +163,52 @@ func deriveKeysAsm(authKey *[24]byte, encKey *[40]byte, kgk *keySchedule, nonce 
 	}
 }
 
-func sum(tag *[TagSize]byte, authKey, nonce, plaintext, additionalData []byte) {
-	length := make([]byte, 16)
-	binary.LittleEndian.PutUint64(length[0:8], uint64(len(additionalData))*8)
-	binary.LittleEndian.PutUint64(length[8:16], uint64(len(plaintext))*8)
-
-	var p polyval.Polyval
+// initPolyval initialises p with the message authentication
+// key.
+func initPolyval(p *polyval.Polyval, authKey []byte) {
 	if err := p.Init(authKey); err != nil {
 		panic(err)
 	}
+}
 
-	// Additional data
-	if len(additionalData) >= 16 {
-		n := len(additionalData) &^ (16 - 1)
-		p.Update(additionalData[:n])
-		additionalData = additionalData[n:]
+// absorbPadded writes data to p, zero padding the final partial
+// block.
+func absorbPadded(p *polyval.Polyval, data []byte) {
+	if n := len(data) &^ (blockSize - 1); n > 0 {
+		p.Update(data[:n])
+		data = data[n:]
 	}
-	if len(additionalData) > 0 {
-		dst := make([]byte, 16)
-		copy(dst, additionalData)
-		p.Update(dst)
+	if len(data) > 0 {
+		var block [blockSize]byte
+		copy(block[:], data)
+		p.Update(block[:])
 	}
+}
 
-	// Plaintext
-	if len(plaintext) >= 16 {
-		n := len(plaintext) &^ (16 - 1)
-		p.Update(plaintext[:n])
-		plaintext = plaintext[n:]
-	}
-	if len(plaintext) > 0 {
-		dst := make([]byte, 16)
-		copy(dst, plaintext)
-		p.Update(dst)
-	}
+// absorbLengths writes the length block to p.
+func absorbLengths(p *polyval.Polyval, adLen, ptLen int) {
+	var length [blockSize]byte
+	binary.LittleEndian.PutUint64(length[0:8], uint64(adLen)*8)
+	binary.LittleEndian.PutUint64(length[8:16], uint64(ptLen)*8)
+	p.Update(length[:])
+}
 
-	// Length
-	p.Update(length)
-
+// maskTag writes the POLYVAL result XORed with the nonce and
+// with the most significant bit cleared to tag.
+func maskTag(p *polyval.Polyval, tag *[TagSize]byte, nonce []byte) {
 	p.Sum(tag[:0])
 	for i := range nonce {
 		tag[i] ^= nonce[i]
 	}
 	tag[15] &= 0x7f
+}
+
+// finishTag absorbs the length block and writes the final
+// authentication tag to tag.
+func finishTag(p *polyval.Polyval, tag *[TagSize]byte, enc *keySchedule, nonce []byte, adLen, ptLen int) {
+	absorbLengths(p, adLen, ptLen)
+	maskTag(p, tag, nonce)
+	encryptBlockAsm(enc.nr, &enc.enc[0], &tag[0], &tag[0])
 }
 
 // aesctr XORs src with the AES-CTR keystream starting at block
