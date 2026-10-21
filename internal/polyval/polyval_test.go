@@ -76,6 +76,7 @@ func testPolyvalRFCVectors(t *testing.T) {
 		blocks := make([]byte, 0, 16*len(tc.X))
 
 		g, _ := New(tc.H) // generic
+		g.initPow()
 		p, _ := New(tc.H) // specialized
 		for _, x := range tc.X {
 			p.Update(x)
@@ -185,6 +186,7 @@ func testPolyvalVectors(t *testing.T) {
 	for i, v := range vecs {
 		key := unhex(v.Input.Key)
 		g, _ := New(key) // generic
+		g.initPow()
 		p, _ := New(key) // specialized
 
 		blocks := unhex(v.Input.Message)
@@ -267,12 +269,11 @@ func testMarshal(t *testing.T) {
 
 func TestInlining(t *testing.T) {
 	want := []string{
+		"New",
 		"(*Polyval).BlockSize",
 		"(*Polyval).Reset",
 		"(*Polyval).Size",
-		"(*Polyval).Update",
 		"fieldElement.String",
-		"(*Polyval).MarshalBinary",
 		"(*Polyval).Sum",
 		"(*fieldElement).setBytes",
 	}
@@ -328,6 +329,7 @@ func BenchmarkPolyvalGeneric(b *testing.B) {
 
 func benchmarkPolyvalGeneric(b *testing.B, nblocks int) {
 	p, _ := New(unhex("01000000000000000000000000000000"))
+	p.initPow()
 	x := make([]byte, nblocks*p.BlockSize())
 	b.SetBytes(int64(len(x)))
 	b.ResetTimer()
@@ -345,4 +347,34 @@ func BenchmarkCtmul(b *testing.B) {
 		z1, z0 = ctmul(z1, z0)
 	}
 	ctmulSink = z1 ^ z0
+}
+
+// TestInitPow tests that initPow computes the same powers of H
+// as repeated multiplication by H.
+func TestInitPow(t *testing.T) {
+	runTests(t, testInitPow)
+}
+
+func testInitPow(t *testing.T) {
+	key := make([]byte, 16)
+	for i := 0; i < 1000; i++ {
+		if _, err := rand.Read(key); err != nil {
+			t.Fatal(err)
+		}
+		var p Polyval
+		if err := p.Init(key); err != nil {
+			continue // zero key
+		}
+		p.initPow()
+
+		var want [8]fieldElement
+		want[7] = p.h
+		for j := 6; j >= 0; j-- {
+			want[j] = p.h
+			polymul(&want[j], &want[j+1])
+		}
+		if p.pow != want {
+			t.Fatalf("%x: expected %v, got %v", key, want, p.pow)
+		}
+	}
 }

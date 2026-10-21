@@ -59,8 +59,13 @@ type Polyval struct {
 	// y is the running state.
 	y fieldElement
 	// pow is a pre-computed table of powers of h for writing
-	// groups of eight blocks.
+	// groups of eight blocks. pow[7] is h and pow[i] is
+	// h^(8-i).
 	pow [8]fieldElement
+	// havePow is set once pow[0:7] has been computed. Short
+	// inputs only need pow[7], so the other powers are
+	// computed on demand.
+	havePow bool
 }
 
 var (
@@ -92,11 +97,45 @@ func (p *Polyval) Init(key []byte) error {
 
 	p.h.setBytes(key)
 	p.pow[len(p.pow)-1] = p.h
-	for i := len(p.pow) - 2; i >= 0; i-- {
-		p.pow[i] = p.h
-		polymul(&p.pow[i], &p.pow[i+1])
-	}
+	p.havePow = false
 	return nil
+}
+
+// initPow computes the powers of h needed to process groups of
+// eight blocks.
+//
+// Multiplication is associative and commutative, so the powers
+// are computed in three dependent steps rather than seven:
+//
+//	h^2 = h*h
+//	h^3 = h^2*h,   h^4 = h^2*h^2
+//	h^5 = h^4*h,   h^6 = h^4*h^2,   h^7 = h^4*h^3,   h^8 = h^4*h^4
+//
+// which lets the CPU overlap the independent multiplications.
+func (p *Polyval) initPow() {
+	pow := &p.pow
+	h1 := &pow[7]
+
+	pow[6] = *h1
+	polymul(&pow[6], h1) // h^2
+	h2 := &pow[6]
+
+	pow[5] = *h2
+	polymul(&pow[5], h1) // h^3
+	pow[4] = *h2
+	polymul(&pow[4], h2) // h^4
+	h3, h4 := &pow[5], &pow[4]
+
+	pow[3] = *h4
+	polymul(&pow[3], h1) // h^5
+	pow[2] = *h4
+	polymul(&pow[2], h2) // h^6
+	pow[1] = *h4
+	polymul(&pow[1], h3) // h^7
+	pow[0] = *h4
+	polymul(&pow[0], h4) // h^8
+
+	p.havePow = true
 }
 
 // Size returns the size of a POLYVAL digest.
@@ -121,6 +160,9 @@ func (p *Polyval) Update(blocks []byte) {
 	if len(blocks)%16 != 0 {
 		panic("polyval: invalid input length")
 	}
+	if !p.havePow && len(blocks) >= 16*len(p.pow) {
+		p.initPow()
+	}
 	polymulBlocks(&p.y, &p.pow, blocks)
 }
 
@@ -139,6 +181,9 @@ func (p *Polyval) Sum(b []byte) []byte {
 //
 // It does not return an error.
 func (p *Polyval) MarshalBinary() ([]byte, error) {
+	if !p.havePow {
+		p.initPow()
+	}
 	buf := make([]byte, 16*(2+len(p.pow)))
 	binary.LittleEndian.PutUint64(buf[0:], p.h.lo)
 	binary.LittleEndian.PutUint64(buf[8:], p.h.hi)
@@ -167,6 +212,7 @@ func (p *Polyval) UnmarshalBinary(data []byte) error {
 		x.hi = binary.LittleEndian.Uint64(data[40+(i*16):])
 		p.pow[i] = x
 	}
+	p.havePow = true
 	return nil
 }
 
