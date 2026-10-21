@@ -168,21 +168,39 @@ func sum(tag *[TagSize]byte, authKey, nonce, plaintext, additionalData []byte) {
 	tag[15] &= 0x7f
 }
 
+// aesctr XORs src with the AES-CTR keystream starting at block
+// and writes the result to dst.
+//
+// Full blocks are processed by ctrBlocksAsm, which encrypts
+// eight (or four) counter blocks in parallel to keep the AES
+// pipeline busy. The trailing partial block, if any, uses a
+// single block encryption.
 func aesctr(nr int, enc *uint32, block *[TagSize]byte, dst, src []byte) {
-	ctr := binary.LittleEndian.Uint32(block[0:4])
+	if len(src) == 0 {
+		return
+	}
+	// Bounds check: the assembly writes len(src) bytes to dst.
+	_ = dst[len(src)-1]
 
-	var ks [blockSize]byte
-	for len(src) >= blockSize && len(dst) >= blockSize {
-		encryptBlockAsm(nr, enc, &ks[0], &block[0])
-		ctr++
-		binary.LittleEndian.PutUint32(block[0:4], ctr)
-		xorBlock((*[blockSize]byte)(dst), (*[blockSize]byte)(src), &ks)
-		dst = dst[blockSize:]
-		src = src[blockSize:]
+	if n := len(src) / blockSize; n > 0 {
+		ctrBlocksAsm(nr, enc, block, &dst[0], &src[0], n)
+		dst = dst[n*blockSize:]
+		src = src[n*blockSize:]
 	}
 
 	if len(src) > 0 {
+		var ks [blockSize]byte
 		encryptBlockAsm(nr, enc, &ks[0], &block[0])
 		xor(dst, src, ks[:], len(src))
 	}
 }
+
+// ctrBlocksAsm XORs nblocks full blocks of AES-CTR keystream,
+// starting at *ctr, into src and writes the result to dst. On
+// return *ctr holds the next unused counter block.
+//
+// nr must be 10 or 14. dst and src must either be equal or not
+// overlap.
+//
+//go:noescape
+func ctrBlocksAsm(nr int, xk *uint32, ctr *[TagSize]byte, dst, src *byte, nblocks int)
