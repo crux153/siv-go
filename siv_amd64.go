@@ -38,6 +38,23 @@ func (k *keySchedule) init(key []byte) {
 	expandKeyAsm(k.nr, &key[0], &k.enc[0])
 }
 
+// wipe zeroes the round keys. It is not inlined so that the
+// stores cannot be removed as dead.
+//
+//go:noinline
+func (k *keySchedule) wipe() {
+	*k = keySchedule{}
+}
+
+// wipeMessageKeys zeroes the per-message key material derived
+// by Seal and Open.
+func wipeMessageKeys(authKey *[24]byte, encKey *[40]byte, enc *keySchedule, p *polyval.Polyval) {
+	wipe(authKey[:])
+	wipe(encKey[:])
+	enc.wipe()
+	p.Wipe()
+}
+
 func (a *aead) seal(out, nonce, plaintext, additionalData []byte) {
 	if !haveAsm {
 		a.sealGeneric(out, nonce, plaintext, additionalData)
@@ -64,6 +81,7 @@ func (a *aead) seal(out, nonce, plaintext, additionalData []byte) {
 		block[15] |= 0x80
 		aesctr(enc.nr, &enc.enc[0], &block, out, plaintext)
 	}
+	wipeMessageKeys(&authKey, &encKey, &enc, &p)
 }
 
 func (a *aead) open(out, nonce, ciphertext, tag, additionalData []byte) bool {
@@ -91,6 +109,7 @@ func (a *aead) open(out, nonce, ciphertext, tag, additionalData []byte) bool {
 
 	var wantTag [TagSize]byte
 	finishTag(&p, &wantTag, &enc, nonce, len(additionalData), len(ciphertext))
+	wipeMessageKeys(&authKey, &encKey, &enc, &p)
 	return subtle.ConstantTimeCompare(tag, wantTag[:]) == 1
 }
 
@@ -125,6 +144,7 @@ func deriveKeys(authKey *[24]byte, encKey *[40]byte, keyGenKey, nonce []byte) {
 	var kgk keySchedule
 	kgk.init(keyGenKey)
 	deriveKeysAsm(authKey, encKey, &kgk, nonce)
+	kgk.wipe()
 }
 
 // deriveKeysAsm is deriveKeys with an already expanded
@@ -161,6 +181,7 @@ func deriveKeysAsm(authKey *[24]byte, encKey *[40]byte, kgk *keySchedule, nonce 
 		copy(encKey[16:24], ks[4*blockSize:])
 		copy(encKey[24:32], ks[5*blockSize:])
 	}
+	wipe(ks[:])
 }
 
 // initPolyval initialises p with the message authentication

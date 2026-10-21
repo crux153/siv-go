@@ -66,3 +66,16 @@ func TestCTRWrap(t *testing.T) {
 		}
 	}
 }
+
+// TestKeyScheduleWipe checks that wipe zeroes the round keys.
+func TestKeyScheduleWipe(t *testing.T) {
+	if !haveAsm {
+		t.Skip("CPU lacks AES-NI or PCLMULQDQ")
+	}
+	var k keySchedule
+	k.init(randbuf(32))
+	k.wipe()
+	if k != (keySchedule{}) {
+		t.Fatal("round keys not wiped")
+	}
+}

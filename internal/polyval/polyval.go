@@ -138,6 +138,14 @@ func (p *Polyval) initPow() {
 	p.havePow = true
 }
 
+// Wipe zeroes the key, its powers and the running state. Init
+// must be called again before p is reused.
+//
+//go:noinline
+func (p *Polyval) Wipe() {
+	*p = Polyval{}
+}
+
 // Size returns the size of a POLYVAL digest.
 func (p *Polyval) Size() int {
 	return Size

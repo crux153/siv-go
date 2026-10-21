@@ -183,6 +183,7 @@ func (c *SegmentCipher) Open(dst, nonce, ciphertext, additionalData []byte) ([]b
 
 	var wantTag [TagSize]byte
 	finishTag(&pv, &wantTag, &enc, nonce, SegmentAADSize, n)
+	wipeMessageKeys(&authKey, &encKey, &enc, &pv)
 	if subtle.ConstantTimeCompare(tag, wantTag[:]) != 1 {
 		wipe(out)
 		return nil, errOpen
@@ -221,6 +222,8 @@ func (s *SegmentSealer) reset(nonce, additionalData []byte) {
 	deriveKeysAsm(&authKey, &encKey, &s.c.kgk, nonce)
 	s.enc.init(encKey[:s.c.keyLen])
 	initPolyval(&s.pv, authKey[:16])
+	wipe(authKey[:])
+	wipe(encKey[:])
 	absorbAAD(&s.pv, additionalData)
 	copy(s.nonce[:], nonce)
 	s.absorbed = 0
@@ -272,7 +275,7 @@ func (s *SegmentSealer) Tag() ([TagSize]byte, error) {
 
 func (s *SegmentSealer) finish() [TagSize]byte {
 	finishTag(&s.pv, &s.tag, &s.enc, s.nonce[:], SegmentAADSize, s.absorbed)
-	s.pv = polyval.Polyval{}
+	s.pv.Wipe()
 	s.ctr = s.tag
 	s.ctr[15] |= 0x80
 	s.phase = phaseKeyStream
@@ -310,7 +313,11 @@ func (s *SegmentSealer) keyStream(dst, src []byte) {
 	}
 }
 
-// clear drops all per-segment key material.
+// clear drops all per-segment key material. It is not inlined
+// so that the stores cannot be removed as dead when s is a local
+// variable.
+//
+//go:noinline
 func (s *SegmentSealer) clear() {
 	c := s.c
 	*s = SegmentSealer{c: c}

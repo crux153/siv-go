@@ -378,3 +378,16 @@ func testInitPow(t *testing.T) {
 		}
 	}
 }
+
+// TestWipe checks that Wipe zeroes the key, powers and state.
+func TestWipe(t *testing.T) {
+	var p Polyval
+	if err := p.Init(unhex("25629347589242761d31f826ba4b757b")); err != nil {
+		t.Fatal(err)
+	}
+	p.Update(make([]byte, 16*16))
+	p.Wipe()
+	if p.h != (fieldElement{}) || p.y != (fieldElement{}) || p.pow != [8]fieldElement{} || p.havePow {
+		t.Fatal("state not wiped")
+	}
+}
