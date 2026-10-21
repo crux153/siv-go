@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-# Launch the differential fuzzing containers. Usage: ./run.sh <end-epoch>
+# Launch the differential fuzzing containers.
+# Usage: ./run.sh <end-epoch> [aead|segment|sealerops|wraphunt ...]
+# With names, only those containers are started.
 set -euo pipefail
 cd "$(dirname "$0")"
 END=${1:?end epoch}
+shift
+NAMES=${*:-aead segment sealerops wraphunt}
+want() { case " $NAMES " in *" $1 "*) return 0 ;; esac; return 1; }
 DUR=$(( END - $(date +%s) ))
 [ "$DUR" -gt 60 ] || { echo "end time too close"; exit 1; }
 mkdir -p logs failures .cache
@@ -20,13 +25,14 @@ docker run --rm "${common[@]}" "$IMG" sh -c \
   "./boringssl.sh && go mod download && go vet -tags $TAGS . && go test -tags $TAGS -count=1 ."
 
 fuzz() { # name target parallel
+  want "$1" || return 0
   docker run -d --name "sivfuzz-$1" "${common[@]}" "$IMG" \
     sh -c "go test -run '^\$' -fuzz '^$2\$' -fuzztime ${DUR}s -parallel $3 -tags $TAGS . > logs/$1.log 2>&1"
 }
 fuzz aead FuzzAEAD 28
 fuzz segment FuzzSegment 36
 fuzz sealerops FuzzSealerOps 12
-docker run -d --name sivfuzz-wraphunt "${common[@]}" \
+want wraphunt && docker run -d --name sivfuzz-wraphunt "${common[@]}" \
   -e WRAPHUNT=${DUR}s -e WRAPHUNT_WORKERS=36 -e WRAPHUNT_LOG=/src/difffuzz/logs/wraphunt.progress "$IMG" \
   sh -c "go test -tags $TAGS -count=1 -run '^TestWrapHunt\$' -timeout 0 -v . > logs/wraphunt.log 2>&1"
 echo "started for ${DUR}s (until $(date -d @"$END"))"

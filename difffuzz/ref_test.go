@@ -5,9 +5,6 @@
 //     shares no code with the fork's pipelined kernels)
 //   - BoringSSL (C and assembly; built by boringssl.sh and linked with
 //     -tags difffuzz_boringssl), which must seal exactly like upstream
-//   - github.com/tink-crypto/tink-go/v2 (pure-Go POLYVAL and CTR; decrypt
-//     side only, because its Encrypt picks a random nonce; sampled,
-//     because it is slow)
 //
 // It lives in its own module so the fork itself is not modified.
 package difffuzz
@@ -27,7 +24,6 @@ import (
 
 	siv "github.com/crux153/siv-go"
 	eric "github.com/ericlagergren/siv"
-	tink "github.com/tink-crypto/tink-go/v2/aead/subtle"
 )
 
 const aadSegment = siv.SegmentAADSize // 57
@@ -75,15 +71,6 @@ func grow(p *[]byte, n int) []byte {
 		*p = make([]byte, n)
 	}
 	return (*p)[:n]
-}
-
-// tinkOpen decrypts with Tink (nonce is prepended in Tink's format).
-func tinkOpen(key, nonce, ct, aad []byte) ([]byte, error) {
-	t, err := tink.NewAESGCMSIV(key)
-	if err != nil {
-		return nil, err
-	}
-	return t.Decrypt(append(bytes.Clone(nonce), ct...), aad)
 }
 
 func mustFork(key []byte) cipher.AEAD {

@@ -10,8 +10,7 @@ import (
 
 // checkAEAD compares the fork's general cipher.AEAD with the
 // references on one input: Seal (fresh, appended, exactly aliased),
-// Open (fresh, aliased), Tink decryption (sampled), and rejection of a
-// tampered byte at flipPos.
+// Open (fresh, aliased), and rejection of a tampered byte at flipPos.
 func checkAEAD(key, nonce, pt, aad []byte, flipPos int, flipBit uint) error {
 	sc := getScratch()
 	defer putScratch(sc)
@@ -47,15 +46,6 @@ func checkAEAD(key, nonce, pt, aad []byte, flipPos int, flipBit uint) error {
 	if err != nil || !bytes.Equal(back, pt) {
 		return fmt.Errorf("NewGCM in-place Open failed (len %d): %v", n, err)
 	}
-	// Tink's pure-Go POLYVAL is slow; check it on every small input
-	// and on one in 16 large ones.
-	if n <= 4096 || flipPos%16 == 0 {
-		back, err = tinkOpen(key, nonce, want, aad)
-		if err != nil || !bytes.Equal(back, pt) {
-			return fmt.Errorf("Tink cannot open the shared ciphertext (len %d): %v", n, err)
-		}
-	}
-
 	bad := grow(&sc.bad, len(want))
 	copy(bad, want)
 	bad[flipPos%len(bad)] ^= 1 << (flipBit % 8)

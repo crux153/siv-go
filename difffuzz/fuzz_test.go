@@ -8,7 +8,7 @@ import (
 	siv "github.com/crux153/siv-go"
 )
 
-// FuzzAEAD: the fork's general AEAD against upstream and Tink on
+// FuzzAEAD: the fork's general AEAD against the references on
 // arbitrary lengths. ext stretches the plaintext up to 3 MiB so the
 // 8/4/1-block loops and multi-megabyte inputs are reached.
 func FuzzAEAD(f *testing.F) {

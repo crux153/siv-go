@@ -3,9 +3,9 @@
 Differential fuzzing of `github.com/crux153/siv-go` against upstream
 `github.com/ericlagergren/siv` (per-block CTR, independent of this
 fork's kernels), BoringSSL (an independent C and assembly
-implementation, which must seal exactly like upstream) and `tink-go`
-(decryption only, sampled). It is a separate module so that the root
-module does not depend on the references.
+implementation, which must seal exactly like upstream). It is a
+separate module so that the root module does not depend on the
+references.
 
 BoringSSL is linked with cgo under `-tags difffuzz_boringssl` from a
 static `libcrypto.a` that `boringssl.sh` builds into `.cache/` inside
