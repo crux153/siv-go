@@ -22,12 +22,34 @@ func polymulBlocks(acc *fieldElement, pow *[8]fieldElement, blocks []byte) {
 	if len(blocks) == 0 {
 		return
 	}
-	if haveAsm {
-		polymulBlocksAsm(acc, pow, &blocks[0], len(blocks)/16)
-	} else {
+	if !haveAsm {
 		polymulBlocksGeneric(acc, pow, blocks)
+		return
 	}
+	// polymulWideAsm is faster per group of eight blocks but
+	// has a fixed setup cost, so short inputs use
+	// polymulBlocksAsm alone. Otherwise the leading blocks that
+	// do not fill a group are processed one at a time first.
+	if len(blocks) < wideMinBytes {
+		polymulBlocksAsm(acc, pow, &blocks[0], len(blocks)/16)
+		return
+	}
+	if r := (len(blocks) / 16) % 8; r > 0 {
+		polymulBlocksAsm(acc, pow, &blocks[0], r)
+		blocks = blocks[16*r:]
+	}
+	polymulWideAsm(acc, pow, &blocks[0], len(blocks)/(16*8))
 }
+
+// wideMinBytes is the input length from which polymulWideAsm is
+// used.
+const wideMinBytes = 8 * 16 * 8
+
+// polymulWideAsm absorbs ngroups groups of eight blocks into
+// acc. ngroups must be positive.
+//
+//go:noescape
+func polymulWideAsm(acc *fieldElement, pow *[8]fieldElement, input *byte, ngroups int)
 
 func ctmul(x, y uint64) (z1, z0 uint64) {
 	return ctmulGeneric(x, y)
