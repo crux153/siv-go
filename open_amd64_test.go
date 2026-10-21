@@ -81,3 +81,71 @@ func TestOpenFused(t *testing.T) {
 		}
 	}
 }
+
+// TestSealFused compares sealFusedAsm with separate AES-CTR and
+// POLYVAL passes over the plaintext, including a counter that
+// wraps and in-place operation.
+func TestSealFused(t *testing.T) {
+	if !haveAsm {
+		t.Skip("CPU lacks AES-NI or PCLMULQDQ")
+	}
+	for _, keySize := range []int{16, 32} {
+		var ks keySchedule
+		ks.init(randbuf(keySize))
+		for groups := 1; groups <= 40; groups++ {
+			for _, wrap := range []bool{false, true} {
+				n := groups * 8 * blockSize
+				src := randbuf(n)
+				hkey := randbuf(16)
+				hkey[0] |= 1 // non-zero
+				prefix := randbuf(4 * blockSize)
+
+				var ctr0 [TagSize]byte
+				copy(ctr0[:], randbuf(TagSize))
+				ctr0[15] |= 0x80
+				if wrap {
+					ctr0[0], ctr0[1], ctr0[2], ctr0[3] = 0xfd, 0xff, 0xff, 0xff
+				}
+
+				want := make([]byte, n)
+				wantCtr := ctr0
+				aesctr(ks.nr, &ks.enc[0], &wantCtr, want, src)
+				var wantPV polyval.Polyval
+				if err := wantPV.Init(hkey); err != nil {
+					t.Fatal(err)
+				}
+				wantPV.Update(prefix)
+				wantPV.Update(src)
+
+				for _, inPlace := range []bool{false, true} {
+					in := src
+					got := make([]byte, n)
+					if inPlace {
+						copy(got, src)
+						in = got
+					}
+					var gotPV polyval.Polyval
+					if err := gotPV.Init(hkey); err != nil {
+						t.Fatal(err)
+					}
+					gotPV.Update(prefix)
+					gotCtr := ctr0
+					acc, pow := gotPV.Raw()
+					sealFusedAsm(ks.nr, &ks.enc[0], &gotCtr, &got[0], &in[0], n/blockSize, acc, pow)
+
+					if !bytes.Equal(want, got) {
+						t.Fatalf("keySize=%d groups=%d wrap=%v inPlace=%v: ciphertext mismatch",
+							keySize, groups, wrap, inPlace)
+					}
+					if gotCtr != wantCtr {
+						t.Fatalf("keySize=%d groups=%d: counter %x, want %x", keySize, groups, gotCtr, wantCtr)
+					}
+					if w, g := wantPV.Sum(nil), gotPV.Sum(nil); !bytes.Equal(w, g) {
+						t.Fatalf("keySize=%d groups=%d wrap=%v inPlace=%v: POLYVAL %x, want %x",
+							keySize, groups, wrap, inPlace, g, w)
+					}
+				}
+			}
+		}
+	}
+}
