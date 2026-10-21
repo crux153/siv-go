@@ -56,8 +56,9 @@ func (s *SegmentSealer) Absorb(tile []byte) error {
 	return ErrUnsupportedCPU
 }
 
-// Tag is unavailable without the amd64 assembly implementation.
-func (s *SegmentSealer) Tag() ([TagSize]byte, error) {
+// Finish is unavailable without the amd64 assembly
+// implementation.
+func (s *SegmentSealer) Finish() ([TagSize]byte, error) {
 	return [TagSize]byte{}, ErrUnsupportedCPU
 }
 

@@ -54,32 +54,47 @@ const (
 	phaseIdle sealerPhase = iota
 	phaseAbsorb
 	phaseKeyStream
+	phaseFinish
 )
 
-// SegmentSealer encrypts one segment in two phases so that the
+// SegmentSealer encrypts one segment in two passes so that the
 // caller can process the plaintext in tiles:
 //
 //  1. Reset with the nonce and additional data, then Absorb
 //     every plaintext tile in order.
-//  2. Tag returns the authentication tag. Then KeyStream
-//     encrypts the same tiles, in the same order.
+//  2. KeyStream encrypts the same plaintext, tile by tile and in
+//     the same order (the tiling may differ from step 1).
+//  3. Finish checks that the plaintext passed to KeyStream is the
+//     plaintext passed to Absorb and returns the authentication
+//     tag, the last TagSize bytes of the sealed segment.
+//
+// KeyStream hashes the plaintext it encrypts, reading each byte
+// once, and Finish compares that hash with the one computed by
+// Absorb in constant time. If they differ (the caller passed
+// different data, or the buffer changed between the two passes),
+// Finish returns ErrPlaintextMismatch and no tag. The output of
+// KeyStream must not be used before Finish succeeds and must be
+// discarded if it fails: it is not a valid encryption and reusing
+// its key stream would leak the XOR of the two plaintexts.
 //
 // Tiles must be non-zero multiples of SegmentQuantum bytes and
-// the total must be a valid segment length. The tiles passed
-// to KeyStream must be byte-for-byte the plaintext passed to
-// Absorb: encrypting different data under the same tag reuses
-// the key stream and breaks confidentiality.
+// the total must be a valid segment length. The result,
+// ciphertext || tag, is identical to SegmentCipher.Seal.
 //
-// The result, ciphertext || tag, is identical to
-// SegmentCipher.Seal. A SegmentSealer is not safe for
-// concurrent use; it can be reused for further segments by
-// calling Reset.
+// A SegmentSealer is not safe for concurrent use. It can be
+// reused for further segments by calling Reset, which also
+// abandons a segment in progress. Per-segment key material is
+// dropped by Finish.
 type SegmentSealer struct {
-	c        *SegmentCipher
-	phase    sealerPhase
-	enc      keySchedule
-	pv       polyval.Polyval
-	nonce    [NonceSize]byte
+	c     *SegmentCipher
+	phase sealerPhase
+	enc   keySchedule
+	pv    polyval.Polyval
+	nonce [NonceSize]byte
+	// aadAcc and ptAcc are the POLYVAL states after the
+	// additional data and after the absorbed plaintext.
+	aadAcc   [16]byte
+	ptAcc    [16]byte
 	tag      [TagSize]byte
 	ctr      [TagSize]byte
 	absorbed int
@@ -120,6 +135,11 @@ func NewSegmentCipher(key []byte, segmentSize int) (*SegmentCipher, error) {
 // It returns ErrSegmentShape if the inputs do not have the shape
 // described by SegmentCipher. dst may alias plaintext exactly,
 // but must not otherwise overlap it.
+//
+// Seal reads the plaintext twice, once to authenticate it and
+// once to encrypt it, and checks that both passes saw the same
+// data. If the plaintext changed in between, the output is
+// zeroed and ErrPlaintextMismatch is returned.
 func (c *SegmentCipher) Seal(dst, nonce, plaintext, additionalData []byte) ([]byte, error) {
 	if err := c.checkShape(nonce, additionalData, len(plaintext)); err != nil {
 		return nil, err
@@ -133,8 +153,14 @@ func (c *SegmentCipher) Seal(dst, nonce, plaintext, additionalData []byte) ([]by
 	s.c = c
 	s.reset(nonce, additionalData)
 	s.absorb(plaintext)
-	*(*[TagSize]byte)(out[len(plaintext):]) = s.finish()
+	s.startKeyStream()
 	s.keyStream(out[:len(plaintext)], plaintext)
+	tag, ok := s.finish()
+	if !ok {
+		wipe(out)
+		return nil, ErrPlaintextMismatch
+	}
+	*(*[TagSize]byte)(out[len(plaintext):]) = tag
 	return ret, nil
 }
 
@@ -225,6 +251,8 @@ func (s *SegmentSealer) reset(nonce, additionalData []byte) {
 	wipe(authKey[:])
 	wipe(encKey[:])
 	absorbAAD(&s.pv, additionalData)
+	acc, _ := s.pv.Raw()
+	s.aadAcc = *acc
 	copy(s.nonce[:], nonce)
 	s.absorbed = 0
 	s.streamed = 0
@@ -252,45 +280,37 @@ func (s *SegmentSealer) absorb(tile []byte) {
 	s.absorbed += len(tile)
 }
 
-// Tag ends the absorb phase and returns the authentication
-// tag, which is also the last TagSize bytes of the sealed
-// segment. Calling Tag again during the key stream phase
-// returns the same tag.
-//
-// It returns ErrSegmentShape if the absorbed plaintext is not a
-// valid segment length.
-func (s *SegmentSealer) Tag() ([TagSize]byte, error) {
-	switch s.phase {
-	case phaseAbsorb:
-		if !s.c.checkLength(s.absorbed) {
-			return [TagSize]byte{}, ErrSegmentShape
-		}
-		return s.finish(), nil
-	case phaseKeyStream:
-		return s.tag, nil
-	default:
-		return [TagSize]byte{}, ErrSealerState
-	}
-}
-
-func (s *SegmentSealer) finish() [TagSize]byte {
+// startKeyStream ends the absorb phase: it records the POLYVAL
+// state of the absorbed plaintext, computes the tag and rewinds
+// POLYVAL to the state after the additional data so that
+// KeyStream can hash the plaintext again.
+func (s *SegmentSealer) startKeyStream() {
+	acc, _ := s.pv.Raw()
+	s.ptAcc = *acc
 	finishTag(&s.pv, &s.tag, &s.enc, s.nonce[:], SegmentAADSize, s.absorbed)
-	s.pv.Wipe()
+	*acc = s.aadAcc
 	s.ctr = s.tag
 	s.ctr[15] |= 0x80
 	s.phase = phaseKeyStream
-	return s.tag
 }
 
-// KeyStream encrypts the next tile of the plaintext passed to
-// Absorb, src, into dst.
+// KeyStream encrypts the next tile of the plaintext, src, into
+// dst. The first call ends the absorb phase.
 //
 // The tile must be a non-zero multiple of SegmentQuantum bytes,
 // len(dst) must be at least len(src), and dst may alias src
-// exactly but must not otherwise overlap it. Once the whole
-// segment has been encrypted the sealer must be Reset before it
-// is used again.
+// exactly but must not otherwise overlap it. It returns
+// ErrSegmentShape if the absorbed plaintext is not a valid
+// segment length or the tiles would exceed it.
+//
+// The output must not be used until Finish succeeds.
 func (s *SegmentSealer) KeyStream(dst, src []byte) error {
+	if s.phase == phaseAbsorb {
+		if !s.c.checkLength(s.absorbed) {
+			return ErrSegmentShape
+		}
+		s.startKeyStream()
+	}
 	if s.phase != phaseKeyStream {
 		return ErrSealerState
 	}
@@ -306,11 +326,42 @@ func (s *SegmentSealer) KeyStream(dst, src []byte) error {
 }
 
 func (s *SegmentSealer) keyStream(dst, src []byte) {
-	ctrBlocksAsm(s.enc.nr, &s.enc.enc[0], &s.ctr, &dst[0], &src[0], len(src)/blockSize)
+	acc, pow := s.pv.Raw()
+	sealFusedAsm(s.enc.nr, &s.enc.enc[0], &s.ctr, &dst[0], &src[0], len(src)/blockSize, acc, pow)
 	s.streamed += len(src)
 	if s.streamed == s.absorbed {
-		s.clear()
+		s.phase = phaseFinish
 	}
+}
+
+// Finish checks that the plaintext encrypted by KeyStream is the
+// plaintext authenticated by Absorb and, if so, returns the
+// authentication tag. It must be called after the whole segment
+// has been passed to KeyStream.
+//
+// If the plaintexts differ it returns ErrPlaintextMismatch; the
+// caller must then discard everything KeyStream wrote for this
+// segment. In both cases the sealer drops its key material and
+// must be Reset before it is used again.
+func (s *SegmentSealer) Finish() ([TagSize]byte, error) {
+	if s.phase != phaseFinish {
+		return [TagSize]byte{}, ErrSealerState
+	}
+	tag, ok := s.finish()
+	if !ok {
+		return [TagSize]byte{}, ErrPlaintextMismatch
+	}
+	return tag, nil
+}
+
+// finish compares the two POLYVAL states in constant time and
+// clears the sealer. The tag must only be used if ok is true.
+func (s *SegmentSealer) finish() (tag [TagSize]byte, ok bool) {
+	acc, _ := s.pv.Raw()
+	ok = subtle.ConstantTimeCompare(acc[:], s.ptAcc[:]) == 1
+	tag = s.tag
+	s.clear()
+	return tag, ok
 }
 
 // clear drops all per-segment key material. It is not inlined

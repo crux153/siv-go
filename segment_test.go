@@ -140,14 +140,6 @@ func TestSegmentSealerTiles(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			tag, err := s.Tag()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(tag[:], want[n:]) {
-				t.Fatalf("n=%d: tag mismatch", n)
-			}
-
 			// Encrypt in place with a different tiling.
 			got := append([]byte(nil), plaintext...)
 			for _, tile := range randomTiles(got) {
@@ -158,8 +150,15 @@ func TestSegmentSealerTiles(t *testing.T) {
 			if !bytes.Equal(got, want[:n]) {
 				t.Fatalf("n=%d: ciphertext mismatch", n)
 			}
+			tag, err := s.Finish()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(tag[:], want[n:]) {
+				t.Fatalf("n=%d: tag mismatch", n)
+			}
 			if err := s.Absorb(plaintext[:SegmentQuantum]); !errors.Is(err, ErrSealerState) {
-				t.Fatalf("sealer still usable after the last tile: %v", err)
+				t.Fatalf("sealer still usable after Finish: %v", err)
 			}
 		}
 	}
@@ -269,8 +268,8 @@ func TestSegmentSealerState(t *testing.T) {
 	if err := s.Absorb(pt[:SegmentQuantum]); !errors.Is(err, ErrSealerState) {
 		t.Fatalf("Absorb before Reset: %v", err)
 	}
-	if _, err := s.Tag(); !errors.Is(err, ErrSealerState) {
-		t.Fatalf("Tag before Reset: %v", err)
+	if _, err := s.Finish(); !errors.Is(err, ErrSealerState) {
+		t.Fatalf("Finish before Reset: %v", err)
 	}
 	if err := s.KeyStream(buf[:SegmentQuantum], pt[:SegmentQuantum]); !errors.Is(err, ErrSealerState) {
 		t.Fatalf("KeyStream before Reset: %v", err)
@@ -288,11 +287,11 @@ func TestSegmentSealerState(t *testing.T) {
 	if err := s.Reset(nonce, aad); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Tag(); !errors.Is(err, ErrSegmentShape) {
-		t.Fatalf("Tag with nothing absorbed: %v", err)
+	if err := s.KeyStream(buf[:SegmentQuantum], pt[:SegmentQuantum]); !errors.Is(err, ErrSegmentShape) {
+		t.Fatalf("KeyStream with nothing absorbed: %v", err)
 	}
-	if err := s.KeyStream(buf[:SegmentQuantum], pt[:SegmentQuantum]); !errors.Is(err, ErrSealerState) {
-		t.Fatalf("KeyStream before Tag: %v", err)
+	if _, err := s.Finish(); !errors.Is(err, ErrSealerState) {
+		t.Fatalf("Finish while absorbing: %v", err)
 	}
 	for _, n := range []int{0, 16, SegmentQuantum - 1, SegmentQuantum + 16} {
 		if err := s.Absorb(pt[:n]); !errors.Is(err, ErrSegmentShape) {
@@ -308,16 +307,6 @@ func TestSegmentSealerState(t *testing.T) {
 	if err := s.Absorb(pt[MinSegmentSize-SegmentQuantum : MinSegmentSize]); err != nil {
 		t.Fatal(err)
 	}
-	tag, err := s.Tag()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tag2, err := s.Tag(); err != nil || tag2 != tag {
-		t.Fatalf("second Tag: %x, %v", tag2, err)
-	}
-	if err := s.Absorb(pt[:SegmentQuantum]); !errors.Is(err, ErrSealerState) {
-		t.Fatalf("Absorb after Tag: %v", err)
-	}
 	if err := s.KeyStream(buf[:SegmentQuantum-1], pt[:SegmentQuantum]); !errors.Is(err, ErrSegmentShape) {
 		t.Fatalf("short dst: %v", err)
 	}
@@ -327,11 +316,27 @@ func TestSegmentSealerState(t *testing.T) {
 	if err := s.KeyStream(buf, pt); !errors.Is(err, ErrSegmentShape) {
 		t.Fatalf("KeyStream past the absorbed length: %v", err)
 	}
-	if err := s.KeyStream(buf[:MinSegmentSize], pt[:MinSegmentSize]); err != nil {
+	if err := s.Absorb(pt[:SegmentQuantum]); !errors.Is(err, ErrSealerState) {
+		t.Fatalf("Absorb after KeyStream: %v", err)
+	}
+	if err := s.KeyStream(buf[:SegmentQuantum], pt[:SegmentQuantum]); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Tag(); !errors.Is(err, ErrSealerState) {
-		t.Fatalf("Tag after the last tile: %v", err)
+	if _, err := s.Finish(); !errors.Is(err, ErrSealerState) {
+		t.Fatalf("Finish before the last tile: %v", err)
+	}
+	if err := s.KeyStream(buf[SegmentQuantum:MinSegmentSize], pt[SegmentQuantum:MinSegmentSize]); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.KeyStream(buf[:SegmentQuantum], pt[:SegmentQuantum]); !errors.Is(err, ErrSealerState) {
+		t.Fatalf("KeyStream after the last tile: %v", err)
+	}
+	tag, err := s.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Finish(); !errors.Is(err, ErrSealerState) {
+		t.Fatalf("second Finish: %v", err)
 	}
 
 	want, err := c.Seal(nil, nonce, pt[:MinSegmentSize], aad)
@@ -340,6 +345,97 @@ func TestSegmentSealerState(t *testing.T) {
 	}
 	if !bytes.Equal(buf[:MinSegmentSize], want[:MinSegmentSize]) || !bytes.Equal(tag[:], want[MinSegmentSize:]) {
 		t.Fatal("sealer output differs from Seal")
+	}
+}
+
+// TestSegmentSealerMismatch checks that Finish detects any
+// difference between the plaintext passed to Absorb and the
+// plaintext passed to KeyStream, and returns no tag.
+func TestSegmentSealerMismatch(t *testing.T) {
+	for _, keySize := range []int{16, 32} {
+		c := newSegmentCipher(t, randbuf(keySize), MinSegmentSize)
+		s := c.NewSealer()
+		for i := 0; i < 300; i++ {
+			n := (1 + rand.Intn(MinSegmentSize/SegmentQuantum)) * SegmentQuantum
+			nonce := randbuf(NonceSize)
+			aad := randbuf(SegmentAADSize)
+			pt := randbuf(n)
+			want, err := c.Seal(nil, nonce, pt, aad)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// What KeyStream sees.
+			other := append([]byte(nil), pt...)
+			var what string
+			switch i % 4 {
+			case 0:
+				what = "bit flip"
+				bit := rand.Intn(n * 8)
+				other[bit/8] ^= 1 << (bit % 8)
+			case 1:
+				what = "first byte"
+				other[0]++
+			case 2:
+				what = "last byte"
+				other[n-1]++
+			case 3:
+				if n < 2*SegmentQuantum {
+					what = "last byte"
+					other[n-1]++
+					break
+				}
+				// Swap the first two quanta.
+				what = "reordered tiles"
+				if bytes.Equal(other[:SegmentQuantum], other[SegmentQuantum:2*SegmentQuantum]) {
+					t.Fatal("random tiles are equal")
+				}
+				tmp := append([]byte(nil), other[:SegmentQuantum]...)
+				copy(other, other[SegmentQuantum:2*SegmentQuantum])
+				copy(other[SegmentQuantum:], tmp)
+			}
+
+			if err := s.Reset(nonce, aad); err != nil {
+				t.Fatal(err)
+			}
+			for _, tile := range randomTiles(pt) {
+				if err := s.Absorb(tile); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out := make([]byte, n)
+			off := 0
+			for _, tile := range randomTiles(other) {
+				if err := s.KeyStream(out[off:off+len(tile)], tile); err != nil {
+					t.Fatal(err)
+				}
+				off += len(tile)
+			}
+			tag, err := s.Finish()
+			if !errors.Is(err, ErrPlaintextMismatch) {
+				t.Fatalf("n=%d %s: Finish returned %v", n, what, err)
+			}
+			if tag != [TagSize]byte{} {
+				t.Fatalf("n=%d %s: Finish returned a tag", n, what)
+			}
+
+			// The sealer is reusable and still correct.
+			if err := s.Reset(nonce, aad); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Absorb(pt); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.KeyStream(out, pt); err != nil {
+				t.Fatal(err)
+			}
+			if tag, err = s.Finish(); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(out, want[:n]) || !bytes.Equal(tag[:], want[n:]) {
+				t.Fatalf("n=%d: output differs from Seal after a mismatch", n)
+			}
+		}
 	}
 }
 
@@ -466,13 +562,13 @@ func benchmarkSegmentSealer(b *testing.B, keySize, n, tile int) {
 				b.Fatal(err)
 			}
 		}
-		if _, err := s.Tag(); err != nil {
-			b.Fatal(err)
-		}
 		for off := 0; off < n; off += tile {
 			if err := s.KeyStream(out[off:off+tile], pt[off:off+tile]); err != nil {
 				b.Fatal(err)
 			}
+		}
+		if _, err := s.Finish(); err != nil {
+			b.Fatal(err)
 		}
 	}
 }

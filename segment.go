@@ -22,6 +22,9 @@ var (
 	// SegmentCipher or SegmentSealer does not have the
 	// required shape.
 	ErrSegmentShape = errors.New("siv: input does not have the shape required by SegmentCipher")
+	// ErrPlaintextMismatch is returned when the plaintext that
+	// was encrypted is not the plaintext that was authenticated.
+	ErrPlaintextMismatch = errors.New("siv: plaintext changed between authentication and encryption")
 	// ErrSealerState is returned when SegmentSealer methods
 	// are called out of order.
 	ErrSealerState = errors.New("siv: SegmentSealer used out of order")
