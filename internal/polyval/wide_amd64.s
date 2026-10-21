@@ -5,10 +5,14 @@
 // Eight-block POLYVAL loop with precomputed Karatsuba terms.
 //
 // polymulBlocksAsm recomputes the Karatsuba term hi^lo of each
-// key power for every block, which costs an extra shuffle per
-// block on the port that also runs PCLMULQDQ on Skylake-class
-// cores. This loop computes those terms once per call. Each
-// block then costs three PCLMULQDQ and one PSHUFD.
+// key power for every block and forms the data block's term with
+// a shuffle; both shuffles run on the port that also runs
+// PCLMULQDQ on Skylake-class cores. This loop computes the key
+// powers' terms once per call, and forms the data block's term
+// by loading its high qword with MOVQ (a load-port uop) and
+// XORing it with the block: PCLMULQDQ only reads the low qword,
+// where that leaves hi^lo. Each block then costs three PCLMULQDQ
+// and no shuffles.
 //
 // The powers h^8..h^1, their Karatsuba terms (packed two per
 // 16 bytes) and the reduction constant are kept in a 16-byte
@@ -24,7 +28,9 @@
 // accumulator stays short.
 //
 // Register use: X0 accumulator, X1 low product, X2 high
-// product, X3 middle product, X4 and X5 scratch.
+// product, X3 middle product, X4 and X5 scratch, X6 reduction
+// constant, X7 h^8. The last two stay in registers because they
+// are on the dependency chain through the accumulator.
 
 DATA wideMask<>+0(SB)/8, $0xc200000000000000
 DATA wideMask<>+8(SB)/8, $0xc200000000000000
@@ -46,28 +52,30 @@ GLOBL wideMask<>(SB), RODATA|NOPTR, $16
 	PUNPCKLQDQ X3, X4; \
 	MOVO       X4, (KOFF+off/2)(R9)
 
-// FIRST multiplies the block in X4 by the power at poff and
-// initialises X1, X2 and X3 with the products.
-#define FIRST(poff, kimm) \
-	PSHUFD    $0x4e, X4, X3; \
+// FIRST multiplies the block at off(SI) by the power at off(R9)
+// and initialises X1, X2 and X3 with the products.
+#define FIRST(off, kimm) \
+	MOVOU     off(SI), X4; \
+	MOVQ      (off+8)(SI), X3; \
 	PXOR      X4, X3; \
-	PCLMULQDQ kimm, (KOFF+poff/32*16)(R9), X3; \
+	PCLMULQDQ kimm, (KOFF+off/32*16)(R9), X3; \
 	MOVO      X4, X1; \
-	PCLMULQDQ $0x00, poff(R9), X1; \
-	MOVO      X4, X2; \
-	PCLMULQDQ $0x11, poff(R9), X2
+	PCLMULQDQ $0x00, off(R9), X1; \
+	PCLMULQDQ $0x11, off(R9), X4; \
+	MOVO      X4, X2
 
-// NEXT multiplies the block in X4 by the power at poff and adds
-// the products to X1, X2 and X3.
-#define NEXT(poff, kimm) \
-	PSHUFD    $0x4e, X4, X5; \
+// NEXT multiplies the block at off(SI) by the power at off(R9)
+// and adds the products to X1, X2 and X3.
+#define NEXT(off, kimm) \
+	MOVOU     off(SI), X4; \
+	MOVQ      (off+8)(SI), X5; \
 	PXOR      X4, X5; \
-	PCLMULQDQ kimm, (KOFF+poff/32*16)(R9), X5; \
+	PCLMULQDQ kimm, (KOFF+off/32*16)(R9), X5; \
 	PXOR      X5, X3; \
 	MOVO      X4, X5; \
-	PCLMULQDQ $0x00, poff(R9), X5; \
+	PCLMULQDQ $0x00, off(R9), X5; \
 	PXOR      X5, X1; \
-	PCLMULQDQ $0x11, poff(R9), X4; \
+	PCLMULQDQ $0x11, off(R9), X4; \
 	PXOR      X4, X2
 
 // LAST turns the Karatsuba sum in X3 into the middle product of
@@ -79,15 +87,15 @@ GLOBL wideMask<>(SB), RODATA|NOPTR, $16
 	PXOR      X1, X3; \
 	PXOR      X2, X3; \
 	MOVO      X4, X5; \
-	PCLMULQDQ $0x01, 0(R9), X5; \
+	PCLMULQDQ $0x01, X7, X5; \
 	PXOR      X5, X3; \
 	MOVO      X4, X5; \
-	PCLMULQDQ $0x10, 0(R9), X5; \
+	PCLMULQDQ $0x10, X7, X5; \
 	PXOR      X5, X3; \
 	MOVO      X4, X5; \
-	PCLMULQDQ $0x00, 0(R9), X5; \
+	PCLMULQDQ $0x00, X7, X5; \
 	PXOR      X5, X1; \
-	PCLMULQDQ $0x11, 0(R9), X4; \
+	PCLMULQDQ $0x11, X7, X4; \
 	PXOR      X4, X2
 
 // REDUCE folds the middle product into the 256-bit result and
@@ -98,12 +106,12 @@ GLOBL wideMask<>(SB), RODATA|NOPTR, $16
 	PXOR      X4, X1; \
 	PSRLDQ    $8, X3; \
 	PXOR      X3, X2; \
-	MOVO      MASKOFF(R9), X0; \
+	MOVO      X6, X0; \
 	PCLMULQDQ $0x00, X1, X0; \
 	PSHUFD    $0x4e, X0, X0; \
 	PXOR      X1, X0; \
 	PXOR      X0, X2; \
-	PCLMULQDQ $0x11, MASKOFF(R9), X0; \
+	PCLMULQDQ $0x11, X6, X0; \
 	PXOR      X2, X0
 
 // func polymulWideAsm(acc *fieldElement, pow *[8]fieldElement, input *byte, ngroups int)
@@ -143,22 +151,17 @@ TEXT ·polymulWideAsm(SB), NOSPLIT, $224-32
 	KARATSUBA2(64)
 	KARATSUBA2(96)
 
+	MOVO  MASKOFF(R9), X6
+	MOVO  0(R9), X7
 	MOVOU (AX), X0
 
 loop:
-	MOVOU 112(SI), X4
 	FIRST(112, $0x10)
-	MOVOU 96(SI), X4
 	NEXT(96, $0x00)
-	MOVOU 80(SI), X4
 	NEXT(80, $0x10)
-	MOVOU 64(SI), X4
 	NEXT(64, $0x00)
-	MOVOU 48(SI), X4
 	NEXT(48, $0x10)
-	MOVOU 32(SI), X4
 	NEXT(32, $0x00)
-	MOVOU 16(SI), X4
 	NEXT(16, $0x10)
 	MOVOU 0(SI), X4
 	PXOR  X0, X4
@@ -170,7 +173,8 @@ loop:
 
 	MOVOU X0, (AX)
 
-	// Do not leave the key powers on the stack.
+	// Do not leave the key powers on the stack or in X7.
+	PXOR X7, X7
 	PXOR X4, X4
 	MOVO X4, 0(R9)
 	MOVO X4, 16(R9)
