@@ -1,10 +1,13 @@
 // Package difffuzz differentially fuzzes github.com/crux153/siv-go
-// against independent AES-GCM-SIV implementations:
+// against BoringSSL's AES-GCM-SIV (C and assembly; built by
+// boringssl.sh and linked with -tags difffuzz_boringssl), which shares
+// no code with the fork.
 //
-//   - github.com/ericlagergren/siv (upstream; per-block CTR, so its CTR
-//     shares no code with the fork's pipelined kernels)
-//   - BoringSSL (C and assembly; built by boringssl.sh and linked with
-//     -tags difffuzz_boringssl), which must seal exactly like upstream
+// Upstream github.com/ericlagergren/siv, which the fork derives from,
+// is not compared on every execution: it is the reference only when
+// BoringSSL is not linked in, and otherwise tells, on a failure,
+// whether BoringSSL or the fork is wrong. TestReferencesAgree checks
+// that the two agree.
 //
 // It lives in its own module so the fork itself is not modified.
 package difffuzz
@@ -28,28 +31,42 @@ import (
 
 const aadSegment = siv.SegmentAADSize // 57
 
-// refSealTo seals with upstream into *want and, if BoringSSL is
-// linked in, checks that BoringSSL agrees, using *alt for its
-// output. Both buffers are reused when large enough.
-func refSealTo(want, alt *[]byte, key, nonce, pt, aad []byte) ([]byte, error) {
+// refSealTo seals into *want, which is reused when large enough,
+// with the reference: BoringSSL when it is linked in, upstream
+// otherwise.
+func refSealTo(want *[]byte, key, nonce, pt, aad []byte) []byte {
+	if haveBoring {
+		return boringSeal(grow(want, len(pt)+siv.TagSize), key, nonce, pt, aad)
+	}
+	return upstreamSeal(grow(want, len(pt)+siv.TagSize)[:0], key, nonce, pt, aad)
+}
+
+// refSeal is refSealTo with a fresh buffer.
+func refSeal(key, nonce, pt, aad []byte) []byte {
+	var want []byte
+	return refSealTo(&want, key, nonce, pt, aad)
+}
+
+// upstreamSeal appends upstream's ciphertext||tag to dst.
+func upstreamSeal(dst, key, nonce, pt, aad []byte) []byte {
 	a, err := eric.NewGCM(key)
 	if err != nil {
 		panic(err)
 	}
-	w := a.Seal(grow(want, len(pt)+siv.TagSize)[:0], nonce, pt, aad)
-	if haveBoring {
-		b := boringSeal(grow(alt, len(pt)+siv.TagSize), key, nonce, pt, aad)
-		if !bytes.Equal(b, w) {
-			return nil, fmt.Errorf("references disagree: BoringSSL differs from upstream (len %d, aad %d)", len(pt), len(aad))
-		}
-	}
-	return w, nil
+	return a.Seal(dst, nonce, pt, aad)
 }
 
-// refSeal is refSealTo with fresh buffers.
-func refSeal(key, nonce, pt, aad []byte) ([]byte, error) {
-	var want, alt []byte
-	return refSealTo(&want, &alt, key, nonce, pt, aad)
+// triage annotates a failed check against BoringSSL with whether
+// upstream agrees with BoringSSL, which tells a fork bug from a
+// reference bug.
+func triage(err error, key, nonce, pt, aad []byte) error {
+	if err == nil || !haveBoring {
+		return err
+	}
+	if bytes.Equal(upstreamSeal(nil, key, nonce, pt, aad), refSeal(key, nonce, pt, aad)) {
+		return fmt.Errorf("%w [upstream agrees with BoringSSL]", err)
+	}
+	return fmt.Errorf("%w [upstream DISAGREES with BoringSSL: check the references]", err)
 }
 
 // scratch holds buffers that are reused across executions, so that
@@ -156,15 +173,17 @@ func TestReferencesAgree(t *testing.T) {
 	if !haveBoring {
 		t.Skip("built without -tags difffuzz_boringssl")
 	}
-	var want, alt []byte
+	var want, up []byte
 	for _, keyLen := range []int{16, 32} {
 		for n := 0; n <= 1<<20; {
 			key := fit([]byte{byte(n), byte(n >> 8)}, keyLen)
 			nonce := fit(key, siv.NonceSize)
 			aad := fit(nonce, n%97)
 			pt := fit(aad, n)
-			if _, err := refSealTo(&want, &alt, key, nonce, pt, aad); err != nil {
-				t.Fatal(err)
+			w := refSealTo(&want, key, nonce, pt, aad)
+			up = upstreamSeal(up[:0], key, nonce, pt, aad)
+			if !bytes.Equal(w, up) {
+				t.Fatalf("BoringSSL differs from upstream (key %d, len %d, aad %d)", keyLen, n, len(aad))
 			}
 			if n < 1024 {
 				n++

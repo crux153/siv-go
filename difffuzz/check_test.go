@@ -9,20 +9,21 @@ import (
 )
 
 // checkAEAD compares the fork's general cipher.AEAD with the
-// references on one input: Seal (fresh, appended, exactly aliased),
+// reference on one input: Seal (fresh, appended, exactly aliased),
 // Open (fresh, aliased), and rejection of a tampered byte at flipPos.
 func checkAEAD(key, nonce, pt, aad []byte, flipPos int, flipBit uint) error {
+	return triage(checkAEADRef(key, nonce, pt, aad, flipPos, flipBit), key, nonce, pt, aad)
+}
+
+func checkAEADRef(key, nonce, pt, aad []byte, flipPos int, flipBit uint) error {
 	sc := getScratch()
 	defer putScratch(sc)
 	n := len(pt)
-	want, err := refSealTo(&sc.want, &sc.alt, key, nonce, pt, aad)
-	if err != nil {
-		return err
-	}
+	want := refSealTo(&sc.want, key, nonce, pt, aad)
 	f := mustFork(key)
 
 	if got := f.Seal(grow(&sc.got, n+siv.TagSize)[:0], nonce, pt, aad); !bytes.Equal(got, want) {
-		return fmt.Errorf("NewGCM Seal differs from upstream (len %d, aad %d)", n, len(aad))
+		return fmt.Errorf("NewGCM Seal differs from the reference (len %d, aad %d)", n, len(aad))
 	}
 	prefix := []byte{0xde, 0xad, 0xbe}
 	pre := grow(&sc.pre, len(prefix)+n+siv.TagSize)
@@ -38,7 +39,7 @@ func checkAEAD(key, nonce, pt, aad []byte, flipPos int, flipBit uint) error {
 
 	back, err := f.Open(grow(&sc.back, n)[:0], nonce, want, aad)
 	if err != nil || !bytes.Equal(back, pt) {
-		return fmt.Errorf("NewGCM Open of upstream ciphertext failed (len %d): %v", n, err)
+		return fmt.Errorf("NewGCM Open of the reference ciphertext failed (len %d): %v", n, err)
 	}
 	ct := grow(&sc.ct, len(want))
 	copy(ct, want)
@@ -56,18 +57,19 @@ func checkAEAD(key, nonce, pt, aad []byte, flipPos int, flipBit uint) error {
 }
 
 // checkSegment compares SegmentCipher and SegmentSealer with the
-// references. tilesA and tilesK are the Absorb and KeyStream tilings
+// reference. tilesA and tilesK are the Absorb and KeyStream tilings
 // (in bytes, each a multiple of SegmentQuantum, summing to len(pt)).
 // If misPos >= 0, a second sealer run changes one plaintext byte at
 // misPos between Absorb and KeyStream and must fail Finish.
 func checkSegment(key, nonce, pt, aad []byte, segSize int, tilesA, tilesK []int, misPos int, flipPos int) error {
+	return triage(checkSegmentRef(key, nonce, pt, aad, segSize, tilesA, tilesK, misPos, flipPos), key, nonce, pt, aad)
+}
+
+func checkSegmentRef(key, nonce, pt, aad []byte, segSize int, tilesA, tilesK []int, misPos int, flipPos int) error {
 	sc := getScratch()
 	defer putScratch(sc)
 	n := len(pt)
-	want, err := refSealTo(&sc.want, &sc.alt, key, nonce, pt, aad)
-	if err != nil {
-		return err
-	}
+	want := refSealTo(&sc.want, key, nonce, pt, aad)
 	c, err := siv.NewSegmentCipher(key, segSize)
 	if err != nil {
 		return err

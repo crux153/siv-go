@@ -201,11 +201,7 @@ func huntOnce(r *rand.Rand, ptBuf *[]byte, st *huntStats) error {
 		for i := range last {
 			last[i] ^= delta[i]
 		}
-		want, err := refSeal(key, nonce, pt, aad)
-		if err != nil {
-			record("wrap-ref", map[string][]byte{"key": key, "nonce": nonce, "aad": aad, "pt": pt}, err.Error())
-			return fmt.Errorf("wrap at byte %d: %w", wrapAt, err)
-		}
+		want := refSeal(key, nonce, pt, aad)
 		if !bytes.Equal(want[n:], tag[:]) {
 			st.predictMiss.Add(1)
 			return nil // hunter bug, not a fork bug; counted

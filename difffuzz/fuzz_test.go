@@ -3,12 +3,13 @@ package difffuzz
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"testing"
 
 	siv "github.com/crux153/siv-go"
 )
 
-// FuzzAEAD: the fork's general AEAD against the references on
+// FuzzAEAD: the fork's general AEAD against the reference on
 // arbitrary lengths. ext stretches the plaintext up to 3 MiB so the
 // 8/4/1-block loops and multi-megabyte inputs are reached.
 func FuzzAEAD(f *testing.F) {
@@ -37,7 +38,7 @@ func FuzzAEAD(f *testing.F) {
 }
 
 // FuzzSegment: SegmentCipher and SegmentSealer (with independent
-// Absorb/KeyStream tilings) against upstream, mismatch detection and
+// Absorb/KeyStream tilings) against the reference, mismatch detection and
 // shape rejection.
 func FuzzSegment(f *testing.F) {
 	f.Add(uint8(0), []byte("k"), []byte("n"), []byte("a"), []byte("p"), uint32(0), []byte{}, uint32(0))
@@ -87,7 +88,7 @@ func FuzzSegment(f *testing.F) {
 //   - no panic;
 //   - Finish never yields a tag unless every plaintext byte passed to
 //     KeyStream equals the absorbed byte and both cover a valid length,
-//     and then ciphertext||tag equals upstream's Seal;
+//     and then ciphertext||tag equals the reference's Seal;
 //   - Finish never reports a mismatch for identical plaintext;
 //   - Absorb never succeeds after KeyStream started; nothing succeeds
 //     before Reset or after Finish.
@@ -170,12 +171,9 @@ func FuzzSealerOps(f *testing.F) {
 					if !same {
 						t.Fatal("Finish released a tag for plaintext that differs from the absorbed plaintext")
 					}
-					want, err := refSealTo(&sc.want, &sc.alt, key, nonce, absorbed, aad)
-					if err != nil {
-						t.Fatal(err)
-					}
+					want := refSealTo(&sc.want, key, nonce, absorbed, aad)
 					if !bytes.Equal(sCipher, want[:len(absorbed)]) || !bytes.Equal(tag[:], want[len(absorbed):]) {
-						t.Fatalf("sealer output differs from upstream (len %d)", len(absorbed))
+						t.Fatal(triage(fmt.Errorf("sealer output differs from the reference (len %d)", len(absorbed)), key, nonce, absorbed, aad))
 					}
 					active = false
 				case errors.Is(err, siv.ErrPlaintextMismatch):

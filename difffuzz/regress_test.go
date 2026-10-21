@@ -19,10 +19,7 @@ func TestResetWithoutFinish(t *testing.T) {
 	nonce := fit([]byte("n"), siv.NonceSize)
 	aad := fit([]byte("a"), aadSegment)
 	pt := fit([]byte("p"), 4096)
-	want, err := refSeal(key, nonce, pt, aad)
-	if err != nil {
-		t.Fatal(err)
-	}
+	want := refSeal(key, nonce, pt, aad)
 	c, err := siv.NewSegmentCipher(key, siv.MinSegmentSize)
 	if err != nil {
 		t.Skip(err)
