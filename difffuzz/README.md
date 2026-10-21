@@ -2,8 +2,15 @@
 
 Differential fuzzing of `github.com/crux153/siv-go` against upstream
 `github.com/ericlagergren/siv` (per-block CTR, independent of this
-fork's kernels) and `tink-go` (decryption only). It is a separate
-module so that the root module does not depend on the references.
+fork's kernels), BoringSSL (an independent C and assembly
+implementation, which must seal exactly like upstream) and `tink-go`
+(decryption only, sampled). It is a separate module so that the root
+module does not depend on the references.
+
+BoringSSL is linked with cgo under `-tags difffuzz_boringssl` from a
+static `libcrypto.a` that `boringssl.sh` builds into `.cache/` inside
+the `golang:1.26` image (no cmake needed). Without the tag the
+BoringSSL comparison is left out.
 
 - `FuzzAEAD`: `NewGCM` Seal/Open against the references.
 - `FuzzSegment`: `SegmentCipher` Seal/Open and `SegmentSealer` tilings.

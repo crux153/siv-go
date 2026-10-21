@@ -3,14 +3,18 @@
 //
 //   - github.com/ericlagergren/siv (upstream; per-block CTR, so its CTR
 //     shares no code with the fork's pipelined kernels)
+//   - BoringSSL (C and assembly; built by boringssl.sh and linked with
+//     -tags difffuzz_boringssl), which must seal exactly like upstream
 //   - github.com/tink-crypto/tink-go/v2 (pure-Go POLYVAL and CTR; decrypt
-//     side only, because its Encrypt picks a random nonce)
+//     side only, because its Encrypt picks a random nonce; sampled,
+//     because it is slow)
 //
 // It lives in its own module so the fork itself is not modified.
 package difffuzz
 
 import (
 	"bytes"
+	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
@@ -18,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"testing"
 	"time"
 
 	siv "github.com/crux153/siv-go"
@@ -27,13 +32,49 @@ import (
 
 const aadSegment = siv.SegmentAADSize // 57
 
-// refSeal is the upstream reference.
-func refSeal(key, nonce, pt, aad []byte) []byte {
+// refSealTo seals with upstream into *want and, if BoringSSL is
+// linked in, checks that BoringSSL agrees, using *alt for its
+// output. Both buffers are reused when large enough.
+func refSealTo(want, alt *[]byte, key, nonce, pt, aad []byte) ([]byte, error) {
 	a, err := eric.NewGCM(key)
 	if err != nil {
 		panic(err)
 	}
-	return a.Seal(nil, nonce, pt, aad)
+	w := a.Seal(grow(want, len(pt)+siv.TagSize)[:0], nonce, pt, aad)
+	if haveBoring {
+		b := boringSeal(grow(alt, len(pt)+siv.TagSize), key, nonce, pt, aad)
+		if !bytes.Equal(b, w) {
+			return nil, fmt.Errorf("references disagree: BoringSSL differs from upstream (len %d, aad %d)", len(pt), len(aad))
+		}
+	}
+	return w, nil
+}
+
+// refSeal is refSealTo with fresh buffers.
+func refSeal(key, nonce, pt, aad []byte) ([]byte, error) {
+	var want, alt []byte
+	return refSealTo(&want, &alt, key, nonce, pt, aad)
+}
+
+// scratch holds buffers that are reused across executions, so that
+// inputs of up to a few MiB do not churn the heap and the GC on
+// every call.
+type scratch struct {
+	pt, want, alt, got, buf, pre, back, ct, bad, out []byte
+}
+
+var scratchPool = sync.Pool{New: func() any { return new(scratch) }}
+
+func getScratch() *scratch   { return scratchPool.Get().(*scratch) }
+func putScratch(sc *scratch) { scratchPool.Put(sc) }
+
+// grow returns (*p)[:n], reallocating only if *p is too small. The
+// contents are not cleared.
+func grow(p *[]byte, n int) []byte {
+	if cap(*p) < n {
+		*p = make([]byte, n)
+	}
+	return (*p)[:n]
 }
 
 // tinkOpen decrypts with Tink (nonce is prepended in Tink's format).
@@ -56,15 +97,30 @@ func mustFork(key []byte) cipher.AEAD {
 // fit returns b resized to n bytes: truncated, or extended
 // deterministically from its own content.
 func fit(b []byte, n int) []byte {
-	out := make([]byte, n)
-	copy(out, b)
-	if len(b) < n {
+	return fitTo(make([]byte, n), b)
+}
+
+// fitTo is fit into out, which it returns.
+func fitTo(out, b []byte) []byte {
+	n := copy(out, b)
+	if n < len(out) {
 		var seed [32]byte
 		copy(seed[:], b)
 		seed[31] ^= byte(len(b))
-		fillRand(rand.New(rand.NewChaCha8(seed)), out[len(b):])
+		streamFill(out[n:], &seed)
 	}
 	return out
+}
+
+// streamFill fills out with AES-CTR keystream from seed, which is
+// several times faster than ChaCha8 for the MiB-sized plaintexts.
+func streamFill(out []byte, seed *[32]byte) {
+	blk, err := aes.NewCipher(seed[:16])
+	if err != nil {
+		panic(err)
+	}
+	clear(out)
+	cipher.NewCTR(blk, seed[16:]).XORKeyStream(out, out)
 }
 
 func fillRand(r *rand.Rand, b []byte) {
@@ -105,4 +161,29 @@ func record(kind string, fields map[string][]byte, msg string) string {
 	}
 	_ = os.WriteFile(name, b.Bytes(), 0o644)
 	return name
+}
+
+// TestReferencesAgree checks BoringSSL against upstream on every
+// length up to 1 KiB and some larger ones.
+func TestReferencesAgree(t *testing.T) {
+	if !haveBoring {
+		t.Skip("built without -tags difffuzz_boringssl")
+	}
+	var want, alt []byte
+	for _, keyLen := range []int{16, 32} {
+		for n := 0; n <= 1<<20; {
+			key := fit([]byte{byte(n), byte(n >> 8)}, keyLen)
+			nonce := fit(key, siv.NonceSize)
+			aad := fit(nonce, n%97)
+			pt := fit(aad, n)
+			if _, err := refSealTo(&want, &alt, key, nonce, pt, aad); err != nil {
+				t.Fatal(err)
+			}
+			if n < 1024 {
+				n++
+			} else {
+				n = n*3/2 + 1
+			}
+		}
+	}
 }

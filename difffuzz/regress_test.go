@@ -19,7 +19,10 @@ func TestResetWithoutFinish(t *testing.T) {
 	nonce := fit([]byte("n"), siv.NonceSize)
 	aad := fit([]byte("a"), aadSegment)
 	pt := fit([]byte("p"), 4096)
-	want := refSeal(key, nonce, pt, aad)
+	want, err := refSeal(key, nonce, pt, aad)
+	if err != nil {
+		t.Fatal(err)
+	}
 	c, err := siv.NewSegmentCipher(key, siv.MinSegmentSize)
 	if err != nil {
 		t.Skip(err)
@@ -35,7 +38,8 @@ func TestResetWithoutFinish(t *testing.T) {
 	} {
 		s := c.NewSealer()
 		prep(s)
-		out, tag, err := runSealer(c, nonce, aad, pt, pt, []int{len(pt)}, []int{len(pt)}, s)
+		out := make([]byte, len(pt))
+		tag, err := runSealer(c, out, nonce, aad, pt, pt, []int{len(pt)}, []int{len(pt)}, s)
 		if err != nil || !bytes.Equal(append(out, tag[:]...), want) {
 			t.Errorf("%s: output differs from RFC 8452 (err %v)", name, err)
 		}

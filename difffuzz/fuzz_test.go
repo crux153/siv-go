@@ -26,7 +26,9 @@ func FuzzAEAD(f *testing.F) {
 			aad = aad[:4096]
 		}
 		if flags&2 != 0 {
-			pt = fit(pt, int(ext%(3<<20)))
+			sc := getScratch()
+			defer putScratch(sc)
+			pt = fitTo(grow(&sc.pt, int(ext%(3<<20))), pt)
 		}
 		if err := checkAEAD(key, nonce, pt, aad, int(ext>>3), uint(flags>>5)); err != nil {
 			t.Fatal(err)
@@ -50,7 +52,9 @@ func FuzzSegment(f *testing.F) {
 		key = fit(key, keyLen)
 		nonce = fit(nonce, siv.NonceSize)
 		aad = fit(aad, aadSegment)
-		pt = fit(pt, n)
+		sc := getScratch()
+		defer putScratch(sc)
+		pt = fitTo(grow(&sc.pt, n), pt)
 		half := len(tiles) / 2
 		tilesA, tilesK := tiling(n, tiles[:half]), tiling(n, tiles[half:])
 		misPos := -1
@@ -95,7 +99,9 @@ func FuzzSealerOps(f *testing.F) {
 		const q = siv.SegmentQuantum
 		key = fit(key, 32)
 		nonce = fit(nonce, siv.NonceSize)
-		pt := fit(ptSeed, segSize)
+		sc := getScratch()
+		defer putScratch(sc)
+		pt := fitTo(grow(&sc.pt, segSize), ptSeed)
 		aad := fit(append([]byte("aad"), nonce...), aadSegment)
 		c, err := siv.NewSegmentCipher(key, segSize)
 		if err != nil {
@@ -119,14 +125,14 @@ func FuzzSealerOps(f *testing.F) {
 					t.Fatalf("valid Reset failed: %v", err)
 				}
 				active, streaming = true, false
-				absorbed, sPlain, sCipher = nil, nil, nil
+				absorbed, sPlain, sCipher = absorbed[:0], sPlain[:0], sCipher[:0]
 			case 1: // Absorb the next k plaintext bytes
 				lo := len(absorbed)
 				hi := min(lo+k, len(pt))
 				if hi == lo {
 					hi = lo + q // overflow on purpose
 				}
-				tile := fit(pt[lo:min(hi, len(pt))], hi-lo)
+				tile := fitTo(grow(&sc.buf, hi-lo), pt[lo:min(hi, len(pt))])
 				err := s.Absorb(tile)
 				if err == nil {
 					if !active {
@@ -139,12 +145,12 @@ func FuzzSealerOps(f *testing.F) {
 				}
 			case 2: // KeyStream the next k bytes, optionally altered
 				lo := len(sPlain)
-				src := make([]byte, k)
-				copy(src, absorbed[min(lo, len(absorbed)):])
+				src := grow(&sc.buf, k)
+				clear(src[copy(src, absorbed[min(lo, len(absorbed)):]):])
 				if arg&0x80 != 0 {
 					src[int(arg>>4)&7%len(src)] ^= 0x40
 				}
-				dst := make([]byte, k)
+				dst := grow(&sc.got, k)
 				if err := s.KeyStream(dst, src); err == nil {
 					if !active {
 						t.Fatal("KeyStream succeeded without an active session")
@@ -164,8 +170,11 @@ func FuzzSealerOps(f *testing.F) {
 					if !same {
 						t.Fatal("Finish released a tag for plaintext that differs from the absorbed plaintext")
 					}
-					want := refSeal(key, nonce, absorbed, aad)
-					if !bytes.Equal(append(bytes.Clone(sCipher), tag[:]...), want) {
+					want, err := refSealTo(&sc.want, &sc.alt, key, nonce, absorbed, aad)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(sCipher, want[:len(absorbed)]) || !bytes.Equal(tag[:], want[len(absorbed):]) {
 						t.Fatalf("sealer output differs from upstream (len %d)", len(absorbed))
 					}
 					active = false
@@ -176,11 +185,11 @@ func FuzzSealerOps(f *testing.F) {
 					active = false
 				}
 			case 4: // Absorb with an invalid size
-				if err := s.Absorb(make([]byte, k+1+int(arg>>4))); err == nil {
+				if err := s.Absorb(grow(&sc.buf, k+1+int(arg>>4))); err == nil {
 					t.Fatal("Absorb accepted a size that is not a multiple of SegmentQuantum")
 				}
 			case 5: // KeyStream into a short dst
-				if err := s.KeyStream(make([]byte, k-1), make([]byte, k)); err == nil {
+				if err := s.KeyStream(grow(&sc.got, k-1), grow(&sc.buf, k)); err == nil {
 					t.Fatal("KeyStream accepted a short dst")
 				}
 			}

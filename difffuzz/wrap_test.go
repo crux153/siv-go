@@ -56,8 +56,9 @@ func TestWrapHunt(t *testing.T) {
 			cryptorand.Read(seed[:])
 			seed[0] ^= byte(w)
 			r := rand.New(rand.NewChaCha8(seed))
+			var pt []byte
 			for time.Now().Before(deadline) {
-				if err := huntOnce(r, &st); err != nil {
+				if err := huntOnce(r, &pt, &st); err != nil {
 					st.failures.Add(1)
 					fmt.Fprintf(os.Stderr, "WRAPHUNT FAILURE: %v\n", err)
 					t.Error(err)
@@ -103,7 +104,9 @@ func (s *huntStats) write(path string, el time.Duration) {
 	}
 }
 
-func huntOnce(r *rand.Rand, st *huntStats) error {
+// huntOnce tries one random base input. ptBuf is reused for the
+// plaintext.
+func huntOnce(r *rand.Rand, ptBuf *[]byte, st *huntStats) error {
 	keyLen := 32
 	if r.IntN(10) == 0 {
 		keyLen = 16
@@ -128,9 +131,11 @@ func huntOnce(r *rand.Rand, st *huntStats) error {
 	if r.IntN(8) == 0 {
 		aadLen = r.IntN(97)
 	}
-	pt := make([]byte, n)
+	pt := grow(ptBuf, n)
 	aad := make([]byte, aadLen)
-	fillRand(r, pt)
+	var ptSeed [32]byte
+	fillRand(r, ptSeed[:])
+	streamFill(pt, &ptSeed)
 	fillRand(r, aad)
 
 	// RFC 8452 §4 key derivation.
@@ -196,7 +201,11 @@ func huntOnce(r *rand.Rand, st *huntStats) error {
 		for i := range last {
 			last[i] ^= delta[i]
 		}
-		want := refSeal(key, nonce, pt, aad)
+		want, err := refSeal(key, nonce, pt, aad)
+		if err != nil {
+			record("wrap-ref", map[string][]byte{"key": key, "nonce": nonce, "aad": aad, "pt": pt}, err.Error())
+			return fmt.Errorf("wrap at byte %d: %w", wrapAt, err)
+		}
 		if !bytes.Equal(want[n:], tag[:]) {
 			st.predictMiss.Add(1)
 			return nil // hunter bug, not a fork bug; counted

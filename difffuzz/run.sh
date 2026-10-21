@@ -13,17 +13,20 @@ common=(--user "$(id -u):$(id -g)" --cpu-shares 256
   -e GOMODCACHE=/src/difffuzz/.cache/mod -e GOFLAGS=-modcacherw
   -e GOTOOLCHAIN=local -e DIFFFUZZ_FAILDIR=/src/difffuzz/failures)
 
-# Warm the module and build caches once.
-docker run --rm "${common[@]}" "$IMG" sh -c 'go mod download && go vet . && go test -c -o /dev/null .'
+TAGS=difffuzz_boringssl
+# Build BoringSSL, warm the module and build caches, and check that
+# the references agree before fuzzing against them.
+docker run --rm "${common[@]}" "$IMG" sh -c \
+  "./boringssl.sh && go mod download && go vet -tags $TAGS . && go test -tags $TAGS -count=1 ."
 
 fuzz() { # name target parallel
   docker run -d --name "sivfuzz-$1" "${common[@]}" "$IMG" \
-    sh -c "go test -run '^\$' -fuzz '^$2\$' -fuzztime ${DUR}s -parallel $3 . > logs/$1.log 2>&1"
+    sh -c "go test -run '^\$' -fuzz '^$2\$' -fuzztime ${DUR}s -parallel $3 -tags $TAGS . > logs/$1.log 2>&1"
 }
 fuzz aead FuzzAEAD 28
 fuzz segment FuzzSegment 36
 fuzz sealerops FuzzSealerOps 12
 docker run -d --name sivfuzz-wraphunt "${common[@]}" \
   -e WRAPHUNT=${DUR}s -e WRAPHUNT_WORKERS=36 -e WRAPHUNT_LOG=/src/difffuzz/logs/wraphunt.progress "$IMG" \
-  sh -c "go test -count=1 -run '^TestWrapHunt\$' -timeout 0 -v . > logs/wraphunt.log 2>&1"
+  sh -c "go test -tags $TAGS -count=1 -run '^TestWrapHunt\$' -timeout 0 -v . > logs/wraphunt.log 2>&1"
 echo "started for ${DUR}s (until $(date -d @"$END"))"
