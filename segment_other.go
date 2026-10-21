@@ -2,6 +2,27 @@
 
 package siv
 
+// SegmentCipher is AES-GCM-SIV restricted to a fixed input
+// shape. It needs the amd64 assembly implementation and is not
+// available in this build.
+type SegmentCipher struct {
+	segmentSize int
+}
+
+// SegmentSize returns the maximum plaintext length.
+func (c *SegmentCipher) SegmentSize() int {
+	return c.segmentSize
+}
+
+// SegmentSealer encrypts one segment in two phases. It is not
+// available in this build.
+type SegmentSealer struct{}
+
+// NewSealer returns a SegmentSealer for c.
+func (c *SegmentCipher) NewSealer() *SegmentSealer {
+	return &SegmentSealer{}
+}
+
 // NewSegmentCipher always returns ErrUnsupportedCPU without the
 // amd64 assembly implementation.
 func NewSegmentCipher(key []byte, segmentSize int) (*SegmentCipher, error) {
