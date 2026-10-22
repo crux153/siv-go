@@ -23,3 +23,21 @@ is the reference.
 `run.sh <end-epoch>` runs all four in Docker (`golang:1.26`) until the
 given time; `status.sh` prints a summary. Failures are written to
 `failures/` and Go fuzz crashers to `testdata/fuzz/`.
+
+## Results
+
+### 2026-10-22, 7 hours
+
+Run against commits 1f98ef8 to dd5fbd4 (library code unchanged
+between them), with no failures:
+
+| Target          | Executions | Corpus |
+|-----------------|-----------:|-------:|
+| `FuzzAEAD`      |     6.65e9 |     86 |
+| `FuzzSegment`   |     1.58e9 |     97 |
+| `FuzzSealerOps` |     2.44e9 |    173 |
+
+`TestWrapHunt` checked 27.0M inputs whose CTR counter wraps inside the
+message (21.5M of them also on the segment paths), with no failures
+and no mispredicted tags. The wraps were spread evenly over the eight
+block positions within an 8-block group.
